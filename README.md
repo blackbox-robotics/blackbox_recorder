@@ -14,13 +14,13 @@ that starts on boot and restarts on crash.
 BLACKBOX_API_URL=http://BLACKBOX_HOST:3001/api \
 BLACKBOX_API_KEY=pk_YOUR_KEY \
 BLACKBOX_ROBOT_ID=YOUR_ROBOT_UUID \
-bash scripts/setup-robot.sh
+bash setup-robot.sh
 ```
 
 Or run it interactively — it will prompt for any missing values:
 
 ```bash
-bash scripts/setup-robot.sh
+bash setup-robot.sh
 ```
 
 After setup, the recorder runs as `blackbox-recorder.service`. Skip to
