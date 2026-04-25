@@ -1,7 +1,7 @@
 # BlackBox — ROS 2 Integration Quickstart
 
 Get your robot sending data to the BlackBox dashboard in under 10 minutes.
-bbrobotics.in
+www.bbrobotics.in
 ---
 
 ## Automated Setup (recommended)
