@@ -1,7 +1,7 @@
 # BlackBox — ROS 2 Integration Quickstart
 
 Get your robot sending data to the BlackBox dashboard in under 10 minutes.
-
+bbrobotics.in
 ---
 
 ## Automated Setup (recommended)
@@ -46,7 +46,7 @@ sudo apt install python3-requests
 
 ## Step 1 — Get Your Credentials
 
-1. Open the BlackBox dashboard and go to **Settings**
+1. Open the BlackBox dashboard and go to **Settings** (https://www.bbrobotics.in/settings)
 2. Copy your **API Key** — it looks like `pk_a3f9...` (48 hex chars after the prefix)
 3. In Settings, create a new **Robot** entry for this machine
 4. Copy the **Robot UUID** shown after creation
