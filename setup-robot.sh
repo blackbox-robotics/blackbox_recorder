@@ -133,8 +133,10 @@ main() {
     # ── 5. Build ─────────────────────────────────────────────────────────────
     step "Build (colcon)"
     (
+        set +u
         # shellcheck source=/dev/null
         source "$ROS_SETUP"
+        set -u
         cd "$BLACKBOX_WS"
         colcon build \
             --packages-select blackbox_recorder \
@@ -180,6 +182,8 @@ BASH
 
     # ── 8. Install systemd service ────────────────────────────────────────────
     step "systemd service: $SERVICE_NAME"
+    if ! [ -d /run/systemd/system ]; then
+        warn "systemd not detected (PID 1 is not systemd)."
     SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
     CURRENT_USER="$(id -un)"
 
