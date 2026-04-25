@@ -35,7 +35,7 @@ class RosbagExporter(Node):
         super().__init__('blackbox_rosbag_exporter')
 
         self.declare_parameter('bag_path', '')
-        self.declare_parameter('api_url', 'http://localhost:3001/api')
+        self.declare_parameter('api_url', 'https://www.bbrobotics.in/api')
         self.declare_parameter('api_key', '')
         self.declare_parameter('robot_id', '')
         self.declare_parameter('task_id', 'unknown')

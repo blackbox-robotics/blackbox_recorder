@@ -11,17 +11,18 @@ that starts on boot and restarts on crash.
 
 ```bash
 # From the BlackBox repo root on your robot machine:
-BLACKBOX_API_URL=http://BLACKBOX_HOST:3001/api \
 BLACKBOX_API_KEY=pk_YOUR_KEY \
 BLACKBOX_ROBOT_ID=YOUR_ROBOT_UUID \
 bash setup-robot.sh
 ```
 
-Or run it interactively — it will prompt for any missing values:
+Or run it interactively — it will prompt for your credentials:
 
 ```bash
 bash setup-robot.sh
 ```
+
+> **Note:** By default, data is sent to `https://www.bbrobotics.in/api`. If you are using a self-hosted BlackBox instance, you can override this by setting `BLACKBOX_API_URL=http://your-ip:3001/api`.
 
 After setup, the recorder runs as `blackbox-recorder.service`. Skip to
 [Step 4 — Wire Up Task Events](#step-4--wire-up-task-events).
@@ -46,12 +47,20 @@ sudo apt install python3-requests
 
 ## Step 1 — Get Your Credentials
 
-1. Open the BlackBox dashboard and go to **Settings** (https://www.bbrobotics.in/settings)
-2. Copy your **API Key** — it looks like `pk_a3f9...` (48 hex chars after the prefix)
-3. In Settings, create a new **Robot** entry for this machine
-4. Copy the **Robot UUID** shown after creation
+To send data, the recorder needs to authenticate with your account and know which robot is sending the data.
 
-You will need both values in Step 3.
+1. **Get your API Key**:
+   - Open the BlackBox dashboard and go to **Settings > API Keys** (https://www.bbrobotics.in/settings).
+   - Copy your **Secret Key** — it starts with `pk_...`. 
+   - *This key acts as your password; it allows the recorder to securely upload data to your account.*
+
+2. **Choose a Robot ID**:
+   - You don't need to create the robot in the dashboard beforehand.
+   - During setup, you will be asked to provide a **Unique ID** (e.g., `robot-01`, `factory-arm-1`). 
+   - If you leave it blank, the script will automatically generate a unique UUID for you.
+   - *This ID is how your robot will identify itself to the BlackBox dashboard once it starts sending data.*
+
+You will need both values for the setup in Step 3.
 
 ---
 
@@ -83,12 +92,9 @@ ros2 pkg list | grep blackbox
 
 ```bash
 ros2 run blackbox_recorder episode_recorder --ros-args \
-  -p api_url:=http://BLACKBOX_HOST:3001/api \
   -p api_key:=pk_YOUR_KEY \
   -p robot_id:=YOUR_ROBOT_UUID
 ```
-
-Replace `BLACKBOX_HOST` with the IP or hostname of your BlackBox backend.
 
 ### Option B — YAML config file (recommended for production)
 
@@ -101,11 +107,16 @@ nano ~/ros2_ws/src/blackbox_recorder/config/recorder_params.yaml
 ```yaml
 blackbox_episode_recorder:
   ros__parameters:
-    api_url: "http://BLACKBOX_HOST:3001/api"
-    api_key: "pk_YOUR_KEY"
-    robot_id: "YOUR_ROBOT_UUID"
-    observation_interval_ms: 100   # collect sensor snapshot every 100ms
-    max_observations: 1000         # cap per episode
+    # Authentication & Destination
+    api_key: "pk_YOUR_KEY"          # Your Secret Key from Settings > API Keys
+    robot_id: "YOUR_ROBOT_ID"       # The Unique ID you defined in the dashboard Robots tab
+    api_url: "https://www.bbrobotics.in/api" # Change this only for self-hosted instances
+
+    # Recording Settings
+    observation_interval_ms: 100   # How often to collect a sensor snapshot (10Hz)
+    max_observations: 1000         # Max snapshots per episode (prevents runaway memory)
+    
+    # Topic Mapping
     joint_states_topic: "/joint_states"
     ft_sensor_topic: "/ft_sensor"
     gripper_topic: "/gripper/state"
@@ -128,15 +139,13 @@ blackbox_recorder = RosNode(
     executable='episode_recorder',
     name='blackbox_episode_recorder',
     parameters=[{
-        'api_url': 'http://BLACKBOX_HOST:3001/api',
         'api_key': 'pk_YOUR_KEY',
         'robot_id': 'YOUR_ROBOT_UUID',
+        'api_url': 'https://www.bbrobotics.in/api',
         'joint_states_topic': '/ur/joint_states',   # if your robot uses a prefix
     }],
     output='screen',
 )
-
-# Add blackbox_recorder to your LaunchDescription's action list
 ```
 
 ---
@@ -272,7 +281,6 @@ If you have existing rosbag2 recordings, import them without re-running experime
 ```bash
 ros2 run blackbox_recorder rosbag_exporter --ros-args \
   -p bag_path:=/path/to/your/rosbag2_dir \
-  -p api_url:=http://BLACKBOX_HOST:3001/api \
   -p api_key:=pk_YOUR_KEY \
   -p robot_id:=YOUR_ROBOT_UUID \
   -p task_id:=pick_and_place
@@ -309,14 +317,14 @@ No data loss from power cuts or node crashes.
 | Symptom | Most likely cause | Fix |
 |---------|-------------------|-----|
 | Node exits immediately on launch | `api_key` or `robot_id` parameter is empty | Set both parameters before launching |
-| Episodes never appear in dashboard | Wrong `robot_id` | UUID must match a robot you created in Settings |
+| Episodes never appear in dashboard | Invalid API Key | Ensure you copied the Secret Key correctly |
 | `joint_states` field empty in episodes | Your robot publishes to a different topic name | Set `-p joint_states_topic:=/your/topic` |
-| API 401 Unauthorized | Wrong or expired API key | Re-copy key from Settings > API Keys |
-| API 404 Not Found | `robot_id` does not belong to your org | Create the robot in Settings first |
-| Network timeout on episode push | Backend unreachable | Check `api_url`, firewall rules, backend health |
+| API 401 / `AUTH_REQUIRED` | Wrong or expired API key | Re-copy your Secret Key from Settings > API Keys |
+| API 404 Not Found | Organization mismatch | Ensure your API Key and Robot ID belong to the same project |
+| Network timeout on episode push | Backend unreachable | Check internet connection or `api_url` |
 | "Episode buffer retained" in logs | Upload failed — network was down | Episode will re-upload automatically on next start |
 | "Already recording" warning | Previous episode never received an `end` event | Always publish `{"event":"end",...}` even on error paths |
-| No data in Fleet tab | WebSocket blocked | Check port 3001 is open and `api_url` is correct |
+| No data in Fleet tab | WebSocket blocked | Check `api_url` and internet access |
 
 ---
 
@@ -324,9 +332,9 @@ No data loss from power cuts or node crashes.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `api_url` | `http://localhost:3001/api` | BlackBox backend base URL |
-| `api_key` | *(required)* | API key from dashboard Settings |
-| `robot_id` | *(required)* | Robot UUID from dashboard Settings |
+| `api_url` | `https://www.bbrobotics.in/api` | BlackBox backend base URL |
+| `api_key` | *(required)* | API key (Secret Key) from dashboard |
+| `robot_id` | *(required)* | Unique ID for this machine (set during setup) |
 | `observation_interval_ms` | `100` | How often to snapshot sensors (ms) |
 | `max_observations` | `1000` | Max observations per episode |
 | `joint_states_topic` | `/joint_states` | ROS topic for joint state data |

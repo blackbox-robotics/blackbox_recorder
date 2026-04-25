@@ -5,7 +5,6 @@
 # starts on boot and restarts automatically on crash.
 #
 # Run (fully automated):
-#   BLACKBOX_API_URL=http://192.168.1.10:3001/api \
 #   BLACKBOX_API_KEY=pk_... \
 #   BLACKBOX_ROBOT_ID=<uuid> \
 #   bash setup-robot.sh
@@ -29,7 +28,7 @@ die()   { echo -e "${RED}[error ]${NC} $*" >&2; exit 1; }
 step()  { echo -e "\n${BOLD}── $* ──${NC}"; }
 
 # ── Config (env vars override interactive prompts) ────────────────────────────
-BLACKBOX_API_URL="${BLACKBOX_API_URL:-}"
+BLACKBOX_API_URL="${BLACKBOX_API_URL:-https://www.bbrobotics.in/api}"
 BLACKBOX_API_KEY="${BLACKBOX_API_KEY:-}"
 BLACKBOX_ROBOT_ID="${BLACKBOX_ROBOT_ID:-}"
 BLACKBOX_WS="${BLACKBOX_WS:-$HOME/blackbox_ws}"
@@ -83,13 +82,26 @@ main() {
 
     # ── 1. Collect credentials ────────────────────────────────────────────────
     step "Credentials"
-    prompt_plain  BLACKBOX_API_URL  "BlackBox backend URL (e.g. http://192.168.1.10:3001/api)"
-    prompt_secret BLACKBOX_API_KEY  "API key (pk_...)"
-    prompt_plain  BLACKBOX_ROBOT_ID "Robot UUID (from dashboard Settings)"
+    info "Find your API Key at: https://www.bbrobotics.in/settings"
+    prompt_secret BLACKBOX_API_KEY  "Enter your API Key (Secret Key starting with pk_)"
+    
+    if [[ -z "$BLACKBOX_ROBOT_ID" ]]; then
+        read -rp "Enter a unique ID for this robot (e.g. my-robot-01) [skip to auto-generate]: " BLACKBOX_ROBOT_ID
+        if [[ -z "$BLACKBOX_ROBOT_ID" ]]; then
+            if command -v uuidgen &>/dev/null; then
+                BLACKBOX_ROBOT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+            elif [[ -f /proc/sys/kernel/random/uuid ]]; then
+                BLACKBOX_ROBOT_ID=$(cat /proc/sys/kernel/random/uuid)
+            else
+                BLACKBOX_ROBOT_ID="robot-$(date +%s)"
+            fi
+            info "Auto-generated Robot ID: $BLACKBOX_ROBOT_ID"
+        fi
+    fi
 
     [[ "$BLACKBOX_API_URL"  =~ ^https?:// ]] || die "API URL must start with http:// or https://"
     [[ "$BLACKBOX_API_KEY"  =~ ^pk_       ]] || die "API key must start with 'pk_'"
-    [[ -n "$BLACKBOX_ROBOT_ID"            ]] || die "Robot UUID cannot be empty"
+    [[ -n "$BLACKBOX_ROBOT_ID"            ]] || die "Robot ID cannot be empty"
 
     # ── 2. Detect ROS 2 ───────────────────────────────────────────────────────
     step "ROS 2 environment"

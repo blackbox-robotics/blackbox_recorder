@@ -6,7 +6,7 @@ from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument('api_url', default_value='http://localhost:3001/api'),
+        DeclareLaunchArgument('api_url', default_value='https://www.bbrobotics.in/api'),
         DeclareLaunchArgument('api_key', default_value=''),
         DeclareLaunchArgument('robot_id', default_value=''),
         DeclareLaunchArgument('observation_interval_ms', default_value='100'),

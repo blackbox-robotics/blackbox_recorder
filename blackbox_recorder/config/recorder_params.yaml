@@ -1,6 +1,6 @@
 blackbox_episode_recorder:
   ros__parameters:
-    api_url: "http://localhost:3001/api"
+    api_url: "https://www.bbrobotics.in/api"
     api_key: ""
     robot_id: ""
     max_observations: 1000
