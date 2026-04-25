@@ -61,7 +61,7 @@ Copy the package into your ROS 2 workspace and build it:
 
 ```bash
 # From the BlackBox repo root
-cp -r ros-nodes/blackbox_recorder ~/ros2_ws/src/
+cp -r blackbox_recorder ~/ros2_ws/src/
 
 cd ~/ros2_ws
 colcon build --packages-select blackbox_recorder
