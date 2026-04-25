@@ -1,0 +1,11 @@
+blackbox_episode_recorder:
+  ros__parameters:
+    api_url: "http://localhost:3001/api"
+    api_key: ""
+    robot_id: ""
+    max_observations: 1000
+    observation_interval_ms: 100
+    # Override these if your robot uses different topic names
+    joint_states_topic: "/joint_states"
+    ft_sensor_topic: "/ft_sensor"
+    gripper_topic: "/gripper/state"
