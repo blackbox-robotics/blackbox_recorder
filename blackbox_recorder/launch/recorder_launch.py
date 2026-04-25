@@ -10,9 +10,9 @@ def generate_launch_description():
         DeclareLaunchArgument('api_key', default_value=''),
         DeclareLaunchArgument('robot_id', default_value=''),
         DeclareLaunchArgument('observation_interval_ms', default_value='100'),
-        DeclareLaunchArgument('joint_states_topic', default_value='/joint_states'),
-        DeclareLaunchArgument('ft_sensor_topic', default_value='/ft_sensor'),
-        DeclareLaunchArgument('gripper_topic', default_value='/gripper/state'),
+        DeclareLaunchArgument('joint_states_topic', default_value='joint_states'),
+        DeclareLaunchArgument('ft_sensor_topic', default_value='ft_sensor'),
+        DeclareLaunchArgument('gripper_topic', default_value='gripper/state'),
 
         Node(
             package='blackbox_recorder',

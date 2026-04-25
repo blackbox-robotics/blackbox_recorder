@@ -41,8 +41,8 @@ class RosbagExporter(Node):
         self.declare_parameter('task_id', 'unknown')
         self.declare_parameter('storage_id', 'sqlite3')
 
-        self.declare_parameter('joint_states_topic', '/joint_states')
-        self.declare_parameter('ft_sensor_topic', '/ft_sensor')
+        self.declare_parameter('joint_states_topic', 'joint_states')
+        self.declare_parameter('ft_sensor_topic', 'ft_sensor')
 
         self.bag_path = self.get_parameter('bag_path').get_parameter_value().string_value
         self.api_url = self.get_parameter('api_url').get_parameter_value().string_value
@@ -101,7 +101,7 @@ class RosbagExporter(Node):
 
             ts = datetime.fromtimestamp(timestamp_ns / 1e9, tz=timezone.utc).isoformat()
 
-            if topic == self.joint_states_topic:
+            if topic == self.joint_states_topic or topic == f'/{self.joint_states_topic}':
                 msg_type = get_message(topic_types[topic])
                 msg = deserialize_message(data, msg_type)
                 observations.append({
@@ -114,7 +114,7 @@ class RosbagExporter(Node):
                     },
                     'sensor_data': {},
                 })
-            elif topic == self.ft_sensor_topic:
+            elif topic == self.ft_sensor_topic or topic == f'/{self.ft_sensor_topic}':
                 msg_type = get_message(topic_types[topic])
                 msg = deserialize_message(data, msg_type)
                 # Append force/torque to the latest observation
@@ -123,7 +123,7 @@ class RosbagExporter(Node):
                         'force': {'x': msg.wrench.force.x, 'y': msg.wrench.force.y, 'z': msg.wrench.force.z},
                         'torque': {'x': msg.wrench.torque.x, 'y': msg.wrench.torque.y, 'z': msg.wrench.torque.z},
                     }
-            elif topic == '/blackbox/task_event':
+            elif topic in ['blackbox/task_event', '/blackbox/task_event']:
                 msg_type = get_message(topic_types[topic])
                 msg = deserialize_message(data, msg_type)
                 try:

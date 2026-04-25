@@ -33,7 +33,7 @@ from std_msgs.msg import String
 class BlackBoxEventPublisher:
     """Publishes task lifecycle events to the Black Box Robotics episode recorder node."""
 
-    TOPIC = '/blackbox/task_event'
+    TOPIC = 'blackbox/task_event'
 
     def __init__(self, node: Node):
         self._pub = node.create_publisher(String, self.TOPIC, 10)
@@ -91,7 +91,7 @@ def main(args=None):
 
     rclpy.init(args=args)
     node = rclpy.create_node('blackbox_task_event_cli')
-    pub = node.create_publisher(String, '/blackbox/task_event', 10)
+    pub = node.create_publisher(String, 'blackbox/task_event', 10)
 
     # Brief sleep so the subscriber has time to connect before we publish and exit
     time.sleep(0.3)
@@ -101,6 +101,6 @@ def main(args=None):
     pub.publish(msg)
 
     time.sleep(0.1)
-    node.get_logger().info(f'Published to /blackbox/task_event: {payload}')
+    node.get_logger().info(f'Published to blackbox/task_event: {payload}')
 
     rclpy.shutdown()

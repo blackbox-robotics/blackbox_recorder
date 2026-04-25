@@ -117,9 +117,10 @@ blackbox_episode_recorder:
     max_observations: 1000         # Max snapshots per episode (prevents runaway memory)
     
     # Topic Mapping
-    joint_states_topic: "/joint_states"
-    ft_sensor_topic: "/ft_sensor"
-    gripper_topic: "/gripper/state"
+    # Relative names support namespacing; they resolve to /robot_id/topic_name
+    joint_states_topic: "joint_states"
+    ft_sensor_topic: "ft_sensor"
+    gripper_topic: "gripper/state"
 ```
 
 Then launch:
@@ -128,7 +129,21 @@ Then launch:
 ros2 launch blackbox_recorder recorder_launch.py
 ```
 
-### Option C — Embed in your robot's existing launch file
+### Option C — Multiple Robots in one go (Fleet Recording)
+
+If you are running multiple robots on the same machine (e.g., in simulation or a multi-robot controller), use the multi-recorder launcher. This spawns a dedicated recorder for each robot ID in its own namespace.
+
+```bash
+ros2 launch blackbox_recorder multi_recorder_launch.py \
+  api_key:=pk_YOUR_KEY \
+  robot_ids:="robot_01,robot_02,robot_03"
+```
+
+Each recorder will automatically listen to namespaced topics:
+- `robot_01` -> `/robot_01/joint_states`, `/robot_01/blackbox/task_event`
+- `robot_02` -> `/robot_02/joint_states`, `/robot_02/blackbox/task_event`
+
+### Option D — Embed in your robot's existing launch file
 
 ```python
 # In your robot.launch.py
@@ -138,11 +153,12 @@ blackbox_recorder = RosNode(
     package='blackbox_recorder',
     executable='episode_recorder',
     name='blackbox_episode_recorder',
+    namespace='my_robot', # Recommended for multi-robot setups
     parameters=[{
         'api_key': 'pk_YOUR_KEY',
-        'robot_id': 'YOUR_ROBOT_UUID',
+        'robot_id': 'my_robot',
         'api_url': 'https://www.bbrobotics.in/api',
-        'joint_states_topic': '/ur/joint_states',   # if your robot uses a prefix
+        'joint_states_topic': 'joint_states', # Resolves to /my_robot/joint_states
     }],
     output='screen',
 )
@@ -152,7 +168,7 @@ blackbox_recorder = RosNode(
 
 ## Step 4 — Wire Up Task Events
 
-The recorder listens on `/blackbox/task_event` for JSON strings that tell it
+The recorder listens on `blackbox/task_event` (relative to its namespace) for JSON strings that tell it
 when a task starts and ends. You control this from your robot's own code.
 
 ### Option A — Use the helper class (cleanest)
@@ -185,24 +201,16 @@ class PickAndPlaceNode(Node):
 import json
 from std_msgs.msg import String
 
-task_pub = self.create_publisher(String, '/blackbox/task_event', 10)
-
-def start(task_id, metadata=None):
-    msg = String()
-    msg.data = json.dumps({'event': 'start', 'task_id': task_id, 'metadata': metadata or {}})
-    task_pub.publish(msg)
-
-def end(success: bool):
-    msg = String()
-    msg.data = json.dumps({'event': 'end', 'success': success})
-    task_pub.publish(msg)
+# Relative name resolves to /my_robot/blackbox/task_event
+task_pub = self.create_publisher(String, 'blackbox/task_event', 10)
 ```
 
 ### Option C — CLI (for manual testing only)
 
 ```bash
-# Start an episode
-ros2 run blackbox_recorder task_event '{"event":"start","task_id":"pick_and_place"}'
+# Start an episode (assuming robot_01 namespace)
+ros2 run blackbox_recorder task_event '{"event":"start","task_id":"pick_and_place"}' --ros-args -r __ns:=/robot_01
+```
 
 # Log an action mid-run
 ros2 run blackbox_recorder task_event '{"event":"action","action_type":"grasp","parameters":{"object":"bolt_A"}}'
@@ -228,19 +236,17 @@ To confirm the recorder is receiving your topics:
 
 ```bash
 # Check what the recorder has subscribed to
-ros2 node info /blackbox_episode_recorder
+ros2 node info /robot_01/recorder_robot_01
 
 # Check the recorder's live status
-ros2 topic echo /blackbox/episode_status
+ros2 topic echo /robot_01/blackbox/episode_status
 ```
 
 ---
 
 ## Topic Remapping
 
-The recorder defaults to standard ROS 2 topic names. If your robot uses
-namespaced or non-standard names, override them with parameters — no remapping
-YAML needed.
+The recorder defaults to **relative** ROS 2 topic names. This means it will automatically prefix topics with its namespace.
 
 ### Common robots
 
@@ -248,24 +254,23 @@ YAML needed.
 ```bash
 ros2 run blackbox_recorder episode_recorder --ros-args \
   -p api_key:=pk_... -p robot_id:=... \
-  -p joint_states_topic:=/ur/joint_states
+  -p joint_states_topic:=ur/joint_states
 ```
 
 **Franka Panda**
 ```bash
 ros2 run blackbox_recorder episode_recorder --ros-args \
   -p api_key:=pk_... -p robot_id:=... \
-  -p joint_states_topic:=/franka/joint_states \
-  -p ft_sensor_topic:=/franka_state_controller/F_ext
+  -p joint_states_topic:=franka/joint_states \
+  -p ft_sensor_topic:=franka_state_controller/F_ext
 ```
 
-**Custom namespaced robot**
+**Global topics**
+If your robot publishes to a global topic (outside any namespace), prefix with `/`:
 ```bash
 ros2 run blackbox_recorder episode_recorder --ros-args \
   -p api_key:=pk_... -p robot_id:=... \
-  -p joint_states_topic:=/robot1/joint_states \
-  -p ft_sensor_topic:=/robot1/force_torque \
-  -p gripper_topic:=/robot1/gripper/position
+  -p joint_states_topic:=/joint_states
 ```
 
 **No F/T sensor or gripper** — leave those parameters at their defaults.
@@ -286,12 +291,12 @@ ros2 run blackbox_recorder rosbag_exporter --ros-args \
   -p task_id:=pick_and_place
 ```
 
-The exporter reads `/joint_states` and `/ft_sensor` from the bag. If your bag
+The exporter reads `joint_states` and `ft_sensor` from the bag. If your bag
 uses different topic names:
 
 ```bash
-  -p joint_states_topic:=/ur/joint_states \
-  -p ft_sensor_topic:=/ur/wrench
+  -p joint_states_topic:=ur/joint_states \
+  -p ft_sensor_topic:=ur/wrench
 ```
 
 Large bags are auto-downsampled to 500 observations to keep payload size
@@ -318,7 +323,7 @@ No data loss from power cuts or node crashes.
 |---------|-------------------|-----|
 | Node exits immediately on launch | `api_key` or `robot_id` parameter is empty | Set both parameters before launching |
 | Episodes never appear in dashboard | Invalid API Key | Ensure you copied the Secret Key correctly |
-| `joint_states` field empty in episodes | Your robot publishes to a different topic name | Set `-p joint_states_topic:=/your/topic` |
+| `joint_states` field empty in episodes | Your robot publishes to a different topic name | Set `-p joint_states_topic:=your/topic` |
 | API 401 / `AUTH_REQUIRED` | Wrong or expired API key | Re-copy your Secret Key from Settings > API Keys |
 | API 404 Not Found | Organization mismatch | Ensure your API Key and Robot ID belong to the same project |
 | Network timeout on episode push | Backend unreachable | Check internet connection or `api_url` |
@@ -337,6 +342,6 @@ No data loss from power cuts or node crashes.
 | `robot_id` | *(required)* | Unique ID for this machine (set during setup) |
 | `observation_interval_ms` | `100` | How often to snapshot sensors (ms) |
 | `max_observations` | `1000` | Max observations per episode |
-| `joint_states_topic` | `/joint_states` | ROS topic for joint state data |
-| `ft_sensor_topic` | `/ft_sensor` | ROS topic for force/torque sensor |
-| `gripper_topic` | `/gripper/state` | ROS topic for gripper position |
+| `joint_states_topic` | `joint_states` | ROS topic for joint state data |
+| `ft_sensor_topic` | `ft_sensor` | ROS topic for force/torque sensor |
+| `gripper_topic` | `gripper/state` | ROS topic for gripper position |

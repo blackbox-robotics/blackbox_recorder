@@ -155,9 +155,9 @@ blackbox_episode_recorder:
     robot_id: "${BLACKBOX_ROBOT_ID}"
     observation_interval_ms: 100
     max_observations: 1000
-    joint_states_topic: "/joint_states"
-    ft_sensor_topic: "/ft_sensor"
-    gripper_topic: "/gripper/state"
+    joint_states_topic: "joint_states"
+    ft_sensor_topic: "ft_sensor"
+    gripper_topic: "gripper/state"
 YAML
     chmod 600 "$PARAMS_FILE"
     ok "Config written  →  $PARAMS_FILE  (mode 600)"
@@ -232,7 +232,7 @@ UNIT
     echo -e "  ${BOLD}Uninstall:${NC}  sudo systemctl disable --now $SERVICE_NAME && sudo rm $SERVICE_FILE"
     echo ""
     echo -e "  ${BOLD}Verify topics:${NC}"
-    echo -e "    source $ROS_SETUP && ros2 topic echo /blackbox/episode_status"
+    echo -e "    source $ROS_SETUP && ros2 topic echo blackbox/episode_status"
     echo ""
     echo -e "  ${BOLD}Send a test episode:${NC}"
     # shellcheck disable=SC2016

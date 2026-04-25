@@ -3,14 +3,13 @@ Black Box Robotics Episode Recorder — ROS 2 node that captures structured robo
 and pushes them to the Black Box Robotics API.
 
 Subscribes to:
-  - /joint_states (sensor_msgs/JointState)
-  - /ft_sensor (geometry_msgs/WrenchStamped)
-  - /gripper/state (std_msgs/Float64)
-  - /camera/image_raw (sensor_msgs/Image) — optional, for frame counting
-  - /blackbox/task_event (std_msgs/String) — JSON task start/end signals
+  - joint_states (sensor_msgs/JointState)
+  - ft_sensor (geometry_msgs/WrenchStamped)
+  - gripper/state (std_msgs/Float64)
+  - blackbox/task_event (std_msgs/String) — JSON task start/end signals
 
 Publishes:
-  - /blackbox/episode_status (std_msgs/String) — episode recording state
+  - blackbox/episode_status (std_msgs/String) — episode recording state
 """
 
 import json
@@ -42,9 +41,9 @@ class EpisodeRecorder(Node):
         self.declare_parameter('max_observations', 1000)
         self.declare_parameter('observation_interval_ms', 100)
 
-        self.declare_parameter('joint_states_topic', '/joint_states')
-        self.declare_parameter('ft_sensor_topic', '/ft_sensor')
-        self.declare_parameter('gripper_topic', '/gripper/state')
+        self.declare_parameter('joint_states_topic', 'joint_states')
+        self.declare_parameter('ft_sensor_topic', 'ft_sensor')
+        self.declare_parameter('gripper_topic', 'gripper/state')
 
         self.api_url = self.get_parameter('api_url').get_parameter_value().string_value
         self.api_key = self.get_parameter('api_key').get_parameter_value().string_value
@@ -89,10 +88,10 @@ class EpisodeRecorder(Node):
         self.create_subscription(JointState, self.joint_states_topic, self.joint_state_cb, sensor_qos)
         self.create_subscription(WrenchStamped, self.ft_sensor_topic, self.ft_cb, sensor_qos)
         self.create_subscription(Float64, self.gripper_topic, self.gripper_cb, sensor_qos)
-        self.create_subscription(String, '/blackbox/task_event', self.task_event_cb, 10)
+        self.create_subscription(String, 'blackbox/task_event', self.task_event_cb, 10)
 
         # Publisher
-        self.status_pub = self.create_publisher(String, '/blackbox/episode_status', 10)
+        self.status_pub = self.create_publisher(String, 'blackbox/episode_status', 10)
 
         # Observation collection timer
         interval_sec = self.obs_interval_ms / 1000.0

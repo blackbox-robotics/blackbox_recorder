@@ -6,6 +6,6 @@ blackbox_episode_recorder:
     max_observations: 1000
     observation_interval_ms: 100
     # Override these if your robot uses different topic names
-    joint_states_topic: "/joint_states"
-    ft_sensor_topic: "/ft_sensor"
-    gripper_topic: "/gripper/state"
+    joint_states_topic: "joint_states"
+    ft_sensor_topic: "ft_sensor"
+    gripper_topic: "gripper/state"
