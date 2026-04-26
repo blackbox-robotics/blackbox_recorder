@@ -191,7 +191,7 @@ BASH
     sudo tee "$SERVICE_FILE" > /dev/null <<UNIT
 [Unit]
 Description=BlackBox Episode Recorder
-Documentation=https://github.com/blackrobotics/blackbox
+Documentation=https://github.com/blackbox-robotics/blackbox_recorder
 After=network-online.target
 Wants=network-online.target
 
