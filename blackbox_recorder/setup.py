@@ -11,6 +11,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', ['launch/recorder_launch.py']),
         ('share/' + package_name + '/config', ['config/recorder_params.yaml']),
+        ('lib/' + package_name, ['scripts/episode_recorder','scripts/rosbag_exporter','scripts/task_event'])
     ],
     install_requires=['setuptools', 'requests'],
     zip_safe=True,
