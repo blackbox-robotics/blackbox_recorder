@@ -184,6 +184,7 @@ BASH
     step "systemd service: $SERVICE_NAME"
     if ! [ -d /run/systemd/system ]; then
         warn "systemd not detected (PID 1 is not systemd)."
+    fi
     SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
     CURRENT_USER="$(id -un)"
 
