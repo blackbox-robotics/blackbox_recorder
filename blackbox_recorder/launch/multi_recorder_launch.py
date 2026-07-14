@@ -18,6 +18,7 @@ def launch_setup(context, *args, **kwargs):
     api_key = LaunchConfiguration('api_key').perform(context)
     api_url = LaunchConfiguration('api_url').perform(context)
     obs_interval = LaunchConfiguration('observation_interval_ms').perform(context)
+    extra_float_topics = LaunchConfiguration('extra_float_topics').perform(context)
 
     nodes = []
     for rid in robot_ids:
@@ -36,6 +37,9 @@ def launch_setup(context, *args, **kwargs):
                 'joint_states_topic': 'joint_states',
                 'ft_sensor_topic': 'ft_sensor',
                 'gripper_topic': 'gripper/state',
+                # Same extra-topics config applied to every robot in this launch —
+                # each still resolves relative to its own /{rid}/ namespace.
+                'extra_float_topics': extra_float_topics,
             }],
             output='screen',
         ))
@@ -63,6 +67,11 @@ def generate_launch_description():
         DeclareLaunchArgument('api_url', default_value='https://www.bbrobotics.in/api'),
         DeclareLaunchArgument('api_key', default_value=''),
         DeclareLaunchArgument('observation_interval_ms', default_value='100'),
-        
+        DeclareLaunchArgument(
+            'extra_float_topics',
+            default_value='',
+            description='Extra std_msgs/Float64 sensors: "topic:field_name,topic:field_name" — applied to every robot',
+        ),
+
         OpaqueFunction(function=launch_setup)
     ])

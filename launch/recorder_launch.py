@@ -13,6 +13,11 @@ def generate_launch_description():
         DeclareLaunchArgument('joint_states_topic', default_value='joint_states'),
         DeclareLaunchArgument('ft_sensor_topic', default_value='ft_sensor'),
         DeclareLaunchArgument('gripper_topic', default_value='gripper/state'),
+        DeclareLaunchArgument(
+            'extra_float_topics',
+            default_value='',
+            description='Extra std_msgs/Float64 sensors: "topic:field_name,topic:field_name"',
+        ),
 
         Node(
             package='blackbox_recorder',
@@ -26,6 +31,7 @@ def generate_launch_description():
                 'joint_states_topic': LaunchConfiguration('joint_states_topic'),
                 'ft_sensor_topic': LaunchConfiguration('ft_sensor_topic'),
                 'gripper_topic': LaunchConfiguration('gripper_topic'),
+                'extra_float_topics': LaunchConfiguration('extra_float_topics'),
             }],
             output='screen',
         ),

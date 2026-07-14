@@ -9,3 +9,8 @@ blackbox_episode_recorder:
     joint_states_topic: "joint_states"
     ft_sensor_topic: "ft_sensor"
     gripper_topic: "gripper/state"
+    # Optional: extra std_msgs/Float64 scalar sensors beyond the three above —
+    # "topic:field_name,topic:field_name". Each shows up under that field name
+    # in every observation's sensor_data. Leave empty if you don't need this.
+    # extra_float_topics: "/motor_temp:temperature,/battery/voltage:battery_voltage"
+    extra_float_topics: ""

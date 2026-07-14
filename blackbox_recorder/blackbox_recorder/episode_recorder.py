@@ -6,6 +6,9 @@ Subscribes to:
   - joint_states (sensor_msgs/JointState)
   - ft_sensor (geometry_msgs/WrenchStamped)
   - gripper/state (std_msgs/Float64)
+  - any topics listed in the extra_float_topics parameter (std_msgs/Float64) —
+    for scalar sensors that don't fit the three built-in types (temperature,
+    battery voltage, custom pressure/current sensors, etc.)
   - blackbox/task_event (std_msgs/String) — JSON task start/end signals
 
 Publishes:
@@ -45,6 +48,13 @@ class EpisodeRecorder(Node):
         self.declare_parameter('ft_sensor_topic', 'ft_sensor')
         self.declare_parameter('gripper_topic', 'gripper/state')
 
+        # Extra scalar (std_msgs/Float64) sensor topics beyond the three built-in
+        # ones. Format: "topic1:field_name1,topic2:field_name2" — e.g.
+        # "/motor_temp:temperature,/battery/voltage:battery_voltage". Each field
+        # shows up under that name in every observation's sensor_data. Empty by
+        # default — no behavior change if unset.
+        self.declare_parameter('extra_float_topics', '')
+
         self.api_url = self.get_parameter('api_url').get_parameter_value().string_value
         self.api_key = self.get_parameter('api_key').get_parameter_value().string_value
         self.robot_id = self.get_parameter('robot_id').get_parameter_value().string_value
@@ -53,12 +63,34 @@ class EpisodeRecorder(Node):
         self.joint_states_topic = self.get_parameter('joint_states_topic').get_parameter_value().string_value
         self.ft_sensor_topic = self.get_parameter('ft_sensor_topic').get_parameter_value().string_value
         self.gripper_topic = self.get_parameter('gripper_topic').get_parameter_value().string_value
+        extra_float_topics_raw = self.get_parameter('extra_float_topics').get_parameter_value().string_value
 
         if not self.api_key or not self.robot_id:
             self.get_logger().error('api_key and robot_id parameters are required')
             raise ValueError('Missing required parameters: api_key, robot_id')
 
         self.headers = {'x-api-key': self.api_key, 'Content-Type': 'application/json'}
+
+        # Parse extra_float_topics into (topic, field_name) pairs. A malformed
+        # entry is logged and skipped rather than crashing the whole node —
+        # one typo in an extra sensor shouldn't take down episode recording.
+        self.extra_float_topics: list = []
+        for entry in extra_float_topics_raw.split(','):
+            entry = entry.strip()
+            if not entry:
+                continue
+            if ':' not in entry:
+                self.get_logger().warn(
+                    f'Skipping malformed extra_float_topics entry (expected '
+                    f'"topic:field_name"): {entry!r}'
+                )
+                continue
+            topic, field_name = entry.split(':', 1)
+            topic, field_name = topic.strip(), field_name.strip()
+            if not topic or not field_name:
+                self.get_logger().warn(f'Skipping malformed extra_float_topics entry: {entry!r}')
+                continue
+            self.extra_float_topics.append((topic, field_name))
 
         # State
         self.recording = False
@@ -72,6 +104,7 @@ class EpisodeRecorder(Node):
         self.latest_joint_state: Optional[dict] = None
         self.latest_ft: Optional[dict] = None
         self.latest_gripper: Optional[float] = None
+        self.latest_extra: dict = {}
         self.last_obs_time: float = 0.0
 
         # Attempt to recover leftover buffer from a previous crash
@@ -88,6 +121,10 @@ class EpisodeRecorder(Node):
         self.create_subscription(JointState, self.joint_states_topic, self.joint_state_cb, sensor_qos)
         self.create_subscription(WrenchStamped, self.ft_sensor_topic, self.ft_cb, sensor_qos)
         self.create_subscription(Float64, self.gripper_topic, self.gripper_cb, sensor_qos)
+        for topic, field_name in self.extra_float_topics:
+            self.create_subscription(
+                Float64, topic, self._make_extra_float_cb(field_name), sensor_qos
+            )
         self.create_subscription(String, 'blackbox/task_event', self.task_event_cb, 10)
 
         # Publisher
@@ -97,10 +134,12 @@ class EpisodeRecorder(Node):
         interval_sec = self.obs_interval_ms / 1000.0
         self.create_timer(interval_sec, self.collect_observation)
 
+        extra_topics_str = ', '.join(f'{t}->{f}' for t, f in self.extra_float_topics) or 'none'
         self.get_logger().info(
             f'Black Box Episode Recorder initialized — robot_id={self.robot_id}, '
             f'api={self.api_url}, interval={self.obs_interval_ms}ms | '
-            f'topics: joints={self.joint_states_topic} ft={self.ft_sensor_topic} gripper={self.gripper_topic}'
+            f'topics: joints={self.joint_states_topic} ft={self.ft_sensor_topic} '
+            f'gripper={self.gripper_topic} extra=[{extra_topics_str}]'
         )
 
     def joint_state_cb(self, msg: JointState):
@@ -119,6 +158,12 @@ class EpisodeRecorder(Node):
 
     def gripper_cb(self, msg: Float64):
         self.latest_gripper = msg.data
+
+    def _make_extra_float_cb(self, field_name: str):
+        """Build a callback that stores an extra Float64 topic's value under field_name."""
+        def _cb(msg: Float64):
+            self.latest_extra[field_name] = msg.data
+        return _cb
 
     def task_event_cb(self, msg: String):
         """Handle task start/end events.
@@ -187,6 +232,8 @@ class EpisodeRecorder(Node):
             obs['sensor_data']['force_torque'] = self.latest_ft
         if self.latest_gripper is not None:
             obs['sensor_data']['gripper_position'] = self.latest_gripper
+        if self.latest_extra:
+            obs['sensor_data'].update(self.latest_extra)
 
         self.observations.append(obs)
         self._flush_buffer()
