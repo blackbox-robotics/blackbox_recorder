@@ -93,8 +93,24 @@ def main(args=None):
     node = rclpy.create_node('blackbox_task_event_cli')
     pub = node.create_publisher(String, 'blackbox/task_event', 10)
 
-    # Brief sleep so the subscriber has time to connect before we publish and exit
-    time.sleep(0.3)
+    # Wait for actual DDS discovery instead of a blind sleep — a one-shot CLI
+    # process that publishes before the recorder node has discovered it will
+    # silently drop the message (reliable QoS guarantees delivery to matched
+    # subscribers, not to ones that haven't matched yet). Poll subscriber
+    # count for up to 3s; warn loudly if nobody ever connects, since that
+    # means the episode_recorder node isn't running or isn't reachable.
+    DISCOVERY_TIMEOUT_S = 3.0
+    waited = 0.0
+    while pub.get_subscription_count() == 0 and waited < DISCOVERY_TIMEOUT_S:
+        time.sleep(0.1)
+        waited += 0.1
+
+    if pub.get_subscription_count() == 0:
+        print(
+            f'WARNING: no subscriber found on blackbox/task_event after '
+            f'{DISCOVERY_TIMEOUT_S}s — is episode_recorder running? '
+            f'Publishing anyway, but the recorder will not see this event.'
+        )
 
     msg = String()
     msg.data = payload
