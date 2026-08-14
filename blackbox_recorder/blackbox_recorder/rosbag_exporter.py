@@ -9,9 +9,24 @@ Usage:
     -p api_key:=pk_... \
     -p robot_id:=<uuid> \
     -p task_id:=pick_and_place
+
+Offline / air-gapped mode (no live network, e.g. RF-denied environments):
+  ros2 run blackbox_recorder rosbag_exporter --ros-args \
+    -p bag_path:=/path/to/rosbag \
+    -p offline_mode:=true \
+    -p export_dir:=/media/sdcard/blackbox_exports \
+    -p robot_id:=<uuid> \
+    -p task_id:=pick_and_place
+
+  Writes a session_*.zip (episode.json + manifest.json + bag files) instead
+  of POSTing. Move the zip off the drone (SD card / USB) and upload it via
+  the dashboard's "Upload Offline Session" flow, or POST it directly to
+  /api/episodes/import. If a live POST is attempted and fails, the episode
+  falls back to this same local zip export rather than being dropped.
 """
 
 import json
+import os
 from datetime import datetime, timezone
 
 import numpy as np
@@ -20,6 +35,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
+
+from blackbox_recorder.offline_export import export_offline_session
 
 try:
     from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
@@ -40,6 +57,8 @@ class RosbagExporter(Node):
         self.declare_parameter('robot_id', '')
         self.declare_parameter('task_id', 'unknown')
         self.declare_parameter('storage_id', 'sqlite3')
+        self.declare_parameter('offline_mode', False)
+        self.declare_parameter('export_dir', os.path.expanduser('~/.blackbox/exports'))
 
         self.declare_parameter('joint_states_topic', 'joint_states')
         self.declare_parameter('ft_sensor_topic', 'ft_sensor')
@@ -50,11 +69,15 @@ class RosbagExporter(Node):
         self.robot_id = self.get_parameter('robot_id').get_parameter_value().string_value
         self.task_id = self.get_parameter('task_id').get_parameter_value().string_value
         self.storage_id = self.get_parameter('storage_id').get_parameter_value().string_value
+        self.offline_mode = self.get_parameter('offline_mode').get_parameter_value().bool_value
+        self.export_dir = self.get_parameter('export_dir').get_parameter_value().string_value
         self.joint_states_topic = self.get_parameter('joint_states_topic').get_parameter_value().string_value
         self.ft_sensor_topic = self.get_parameter('ft_sensor_topic').get_parameter_value().string_value
 
-        if not all([self.bag_path, self.api_key, self.robot_id]):
-            self.get_logger().error('bag_path, api_key, and robot_id are required')
+        # api_key/api_url aren't meaningful in offline mode — nothing gets POSTed
+        required = [self.bag_path, self.robot_id] if self.offline_mode else [self.bag_path, self.api_key, self.robot_id]
+        if not all(required):
+            self.get_logger().error('bag_path and robot_id are required (api_key also required unless offline_mode:=true)')
             raise ValueError('Missing required parameters')
 
         self.headers = {'x-api-key': self.api_key, 'Content-Type': 'application/json'}
@@ -170,6 +193,10 @@ class RosbagExporter(Node):
             f'Extracted episode: {len(observations)} observations, {len(actions)} actions'
         )
 
+        if self.offline_mode:
+            self._export_offline(episode)
+            return
+
         try:
             resp = requests.post(
                 f'{self.api_url}/episodes',
@@ -181,9 +208,15 @@ class RosbagExporter(Node):
                 eid = resp.json().get('data', {}).get('id', 'unknown')
                 self.get_logger().info(f'Episode created: {eid}')
             else:
-                self.get_logger().error(f'API error: {resp.status_code} — {resp.text}')
+                self.get_logger().error(f'API error: {resp.status_code} — {resp.text}. Falling back to local export.')
+                self._export_offline(episode)
         except requests.RequestException as e:
-            self.get_logger().error(f'Push failed: {e}')
+            self.get_logger().error(f'Push failed: {e}. Falling back to local export.')
+            self._export_offline(episode)
+
+    def _export_offline(self, episode: dict) -> None:
+        zip_path, session_id = export_offline_session(episode, self.export_dir, bag_path=self.bag_path)
+        self.get_logger().info(f'Offline session exported: {zip_path} (session_id={session_id})')
 
 
 def main(args=None):

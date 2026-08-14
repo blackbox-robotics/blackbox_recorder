@@ -21,6 +21,7 @@ Publishes:
 """
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -30,6 +31,8 @@ import rospy
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import WrenchStamped
 from std_msgs.msg import Float64, String
+
+from blackbox_recorder.offline_export import export_offline_session
 
 
 class EpisodeRecorder(object):
@@ -48,6 +51,8 @@ class EpisodeRecorder(object):
         self.robot_id = rospy.get_param('~robot_id', '')
         self.max_obs = int(rospy.get_param('~max_observations', 1000))
         self.obs_interval_ms = int(rospy.get_param('~observation_interval_ms', 100))
+        self.offline_mode = bool(rospy.get_param('~offline_mode', False))
+        self.export_dir = rospy.get_param('~export_dir', os.path.expanduser('~/.blackbox/exports'))
 
         self.joint_states_topic = rospy.get_param('~joint_states_topic', 'joint_states')
         self.ft_sensor_topic = rospy.get_param('~ft_sensor_topic', 'ft_sensor')
@@ -60,9 +65,10 @@ class EpisodeRecorder(object):
         # default — no behavior change if unset.
         extra_float_topics_raw = rospy.get_param('~extra_float_topics', '')
 
-        if not self.api_key or not self.robot_id:
-            rospy.logerr('api_key and robot_id parameters are required')
-            raise ValueError('Missing required parameters: api_key, robot_id')
+        # api_key isn't meaningful in offline mode — nothing gets POSTed
+        if not self.robot_id or (not self.offline_mode and not self.api_key):
+            rospy.logerr('robot_id is required (api_key also required unless offline_mode:=true)')
+            raise ValueError('Missing required parameters')
 
         self.headers = {'x-api-key': self.api_key, 'Content-Type': 'application/json'}
 
@@ -308,24 +314,34 @@ class EpisodeRecorder(object):
         self._upload_episode(data, from_recovery=False)
 
     def _upload_episode(self, data, from_recovery):
-        """Attempt to POST episode data. Manages buffer file on success/failure."""
-        try:
-            resp = requests.post(
-                '%s/episodes' % self.api_url,
-                json=data,
-                headers=self.headers,
-                timeout=30,
-            )
-            if resp.status_code == 201:
-                episode_id = resp.json().get('data', {}).get('id', 'unknown')
-                rospy.loginfo('Episode pushed successfully — id=%s' % episode_id)
-                self._delete_buffer()
-            else:
-                rospy.logerr('Failed to push episode: %d — %s' % (resp.status_code, resp.text))
-                rospy.logwarn('Episode buffer retained at %s for recovery' % self.BUFFER_PATH)
-        except requests.RequestException as e:
-            rospy.logerr('Failed to push episode: %s' % e)
-            rospy.logwarn('Episode buffer retained at %s for recovery' % self.BUFFER_PATH)
+        """
+        POSTs episode data, unless offline_mode is set. On any failure (or in
+        offline_mode), falls back to a durable session zip via the same
+        offline_export module rosbag_exporter uses — same pipeline either way,
+        network or none. This replaces the old /tmp-buffer-only fallback: a
+        zip survives a power-cycle and can be physically moved off the drone,
+        which a /tmp file cannot.
+        """
+        if not self.offline_mode:
+            try:
+                resp = requests.post(
+                    '%s/episodes' % self.api_url,
+                    json=data,
+                    headers=self.headers,
+                    timeout=30,
+                )
+                if resp.status_code == 201:
+                    episode_id = resp.json().get('data', {}).get('id', 'unknown')
+                    rospy.loginfo('Episode pushed successfully — id=%s' % episode_id)
+                    self._delete_buffer()
+                    return
+                rospy.logerr('Failed to push episode: %d — %s. Falling back to local export.' % (resp.status_code, resp.text))
+            except requests.RequestException as e:
+                rospy.logerr('Failed to push episode: %s. Falling back to local export.' % e)
+
+        zip_path, session_id = export_offline_session(data, self.export_dir)
+        rospy.loginfo('Offline session exported: %s (session_id=%s)' % (zip_path, session_id))
+        self._delete_buffer()
 
     def publish_status(self, state, task_id):
         msg = String()

@@ -12,13 +12,29 @@ Usage:
     _api_key:=pk_... \
     _robot_id:=<uuid> \
     _task_id:=pick_and_place
+
+Offline / air-gapped mode (no live network, e.g. RF-denied environments):
+  rosrun blackbox_recorder rosbag_exporter _bag_path:=/path/to/recording.bag \
+    _offline_mode:=true \
+    _export_dir:=/media/sdcard/blackbox_exports \
+    _robot_id:=<uuid> \
+    _task_id:=pick_and_place
+
+  Writes a session_*.zip (episode.json + manifest.json + bag file) instead
+  of POSTing. Move the zip off the drone (SD card / USB) and upload it via
+  the dashboard's "Upload Offline Session" flow, or POST it directly to
+  /api/episodes/import. If a live POST is attempted and fails, the episode
+  falls back to this same local zip export rather than being dropped.
 """
 
 import json
+import os
 from datetime import datetime, timezone
 
 import requests
 import rospy
+
+from blackbox_recorder.offline_export import export_offline_session
 
 try:
     import rosbag
@@ -50,8 +66,14 @@ class RosbagExporter(object):
         self.joint_states_topic = rospy.get_param('~joint_states_topic', 'joint_states')
         self.ft_sensor_topic = rospy.get_param('~ft_sensor_topic', 'ft_sensor')
 
-        if not (self.bag_path and self.api_key and self.robot_id):
-            rospy.logerr('bag_path, api_key, and robot_id are required')
+        self.offline_mode = rospy.get_param('~offline_mode', False)
+        self.export_dir = rospy.get_param('~export_dir', os.path.expanduser('~/.blackbox/exports'))
+
+        # api_key/api_url aren't meaningful in offline mode — nothing gets POSTed
+        required = (self.bag_path and self.robot_id) if self.offline_mode \
+            else (self.bag_path and self.api_key and self.robot_id)
+        if not required:
+            rospy.logerr('bag_path and robot_id are required (api_key also required unless offline_mode:=true)')
             raise ValueError('Missing required parameters')
 
         self.headers = {'x-api-key': self.api_key, 'Content-Type': 'application/json'}
@@ -149,6 +171,10 @@ class RosbagExporter(object):
             'Extracted episode: %d observations, %d actions' % (len(observations), len(actions))
         )
 
+        if self.offline_mode:
+            self._export_offline(episode)
+            return
+
         try:
             resp = requests.post(
                 '%s/episodes' % self.api_url,
@@ -160,9 +186,15 @@ class RosbagExporter(object):
                 eid = resp.json().get('data', {}).get('id', 'unknown')
                 rospy.loginfo('Episode created: %s' % eid)
             else:
-                rospy.logerr('API error: %d — %s' % (resp.status_code, resp.text))
+                rospy.logerr('API error: %d — %s. Falling back to local export.' % (resp.status_code, resp.text))
+                self._export_offline(episode)
         except requests.RequestException as e:
-            rospy.logerr('Push failed: %s' % e)
+            rospy.logerr('Push failed: %s. Falling back to local export.' % e)
+            self._export_offline(episode)
+
+    def _export_offline(self, episode):
+        zip_path, session_id = export_offline_session(episode, self.export_dir, bag_path=self.bag_path)
+        rospy.loginfo('Offline session exported: %s (session_id=%s)' % (zip_path, session_id))
 
 
 def main():

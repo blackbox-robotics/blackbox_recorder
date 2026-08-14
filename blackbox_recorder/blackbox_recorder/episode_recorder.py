@@ -16,6 +16,7 @@ Publishes:
 """
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -27,6 +28,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import WrenchStamped
 from std_msgs.msg import Float64, String
+
+from blackbox_recorder.offline_export import export_offline_session
 
 
 class EpisodeRecorder(Node):
@@ -43,6 +46,8 @@ class EpisodeRecorder(Node):
         self.declare_parameter('robot_id', '')
         self.declare_parameter('max_observations', 1000)
         self.declare_parameter('observation_interval_ms', 100)
+        self.declare_parameter('offline_mode', False)
+        self.declare_parameter('export_dir', os.path.expanduser('~/.blackbox/exports'))
 
         self.declare_parameter('joint_states_topic', 'joint_states')
         self.declare_parameter('ft_sensor_topic', 'ft_sensor')
@@ -60,14 +65,17 @@ class EpisodeRecorder(Node):
         self.robot_id = self.get_parameter('robot_id').get_parameter_value().string_value
         self.max_obs = self.get_parameter('max_observations').get_parameter_value().integer_value
         self.obs_interval_ms = self.get_parameter('observation_interval_ms').get_parameter_value().integer_value
+        self.offline_mode = self.get_parameter('offline_mode').get_parameter_value().bool_value
+        self.export_dir = self.get_parameter('export_dir').get_parameter_value().string_value
         self.joint_states_topic = self.get_parameter('joint_states_topic').get_parameter_value().string_value
         self.ft_sensor_topic = self.get_parameter('ft_sensor_topic').get_parameter_value().string_value
         self.gripper_topic = self.get_parameter('gripper_topic').get_parameter_value().string_value
         extra_float_topics_raw = self.get_parameter('extra_float_topics').get_parameter_value().string_value
 
-        if not self.api_key or not self.robot_id:
-            self.get_logger().error('api_key and robot_id parameters are required')
-            raise ValueError('Missing required parameters: api_key, robot_id')
+        # api_key isn't meaningful in offline mode — nothing gets POSTed
+        if not self.robot_id or (not self.offline_mode and not self.api_key):
+            self.get_logger().error('robot_id is required (api_key also required unless offline_mode:=true)')
+            raise ValueError('Missing required parameters')
 
         self.headers = {'x-api-key': self.api_key, 'Content-Type': 'application/json'}
 
@@ -319,30 +327,36 @@ class EpisodeRecorder(Node):
         self._upload_episode(data, from_recovery=False)
 
     def _upload_episode(self, data: dict, from_recovery: bool):
-        """Attempt to POST episode data. Manages buffer file on success/failure."""
-        try:
-            resp = requests.post(
-                f'{self.api_url}/episodes',
-                json=data,
-                headers=self.headers,
-                timeout=30,
-            )
-            if resp.status_code == 201:
-                episode_id = resp.json().get('data', {}).get('id', 'unknown')
-                self.get_logger().info(f'Episode pushed successfully — id={episode_id}')
-                self._delete_buffer()
-            else:
+        """
+        POSTs episode data, unless offline_mode is set. On any failure (or in
+        offline_mode), falls back to a durable session zip via the same
+        offline_export module rosbag_exporter uses — same pipeline either way,
+        network or none. This replaces the old /tmp-buffer-only fallback: a
+        zip survives a power-cycle and can be physically moved off the drone,
+        which a /tmp file cannot.
+        """
+        if not self.offline_mode:
+            try:
+                resp = requests.post(
+                    f'{self.api_url}/episodes',
+                    json=data,
+                    headers=self.headers,
+                    timeout=30,
+                )
+                if resp.status_code == 201:
+                    episode_id = resp.json().get('data', {}).get('id', 'unknown')
+                    self.get_logger().info(f'Episode pushed successfully — id={episode_id}')
+                    self._delete_buffer()
+                    return
                 self.get_logger().error(
-                    f'Failed to push episode: {resp.status_code} — {resp.text}'
+                    f'Failed to push episode: {resp.status_code} — {resp.text}. Falling back to local export.'
                 )
-                self.get_logger().warn(
-                    f'Episode buffer retained at {self.BUFFER_PATH} for recovery'
-                )
-        except requests.RequestException as e:
-            self.get_logger().error(f'Failed to push episode: {e}')
-            self.get_logger().warn(
-                f'Episode buffer retained at {self.BUFFER_PATH} for recovery'
-            )
+            except requests.RequestException as e:
+                self.get_logger().error(f'Failed to push episode: {e}. Falling back to local export.')
+
+        zip_path, session_id = export_offline_session(data, self.export_dir)
+        self.get_logger().info(f'Offline session exported: {zip_path} (session_id={session_id})')
+        self._delete_buffer()
 
     def publish_status(self, state: str, task_id: str):
         msg = String()
