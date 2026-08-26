@@ -17,6 +17,7 @@ Publishes:
 
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -76,6 +77,19 @@ class EpisodeRecorder(Node):
         if not self.robot_id or (not self.offline_mode and not self.api_key):
             self.get_logger().error('robot_id is required (api_key also required unless offline_mode:=true)')
             raise ValueError('Missing required parameters')
+
+        # robot_id must be the robot's dashboard UUID (Settings > Robots), not a
+        # friendly name — the backend validates it as a UUID and rejects anything
+        # else at upload time, so a bad value here silently wastes an entire
+        # recording session before the operator finds out.
+        try:
+            uuid.UUID(self.robot_id)
+        except ValueError:
+            self.get_logger().error(
+                f"robot_id '{self.robot_id}' is not a valid UUID — copy the robot's id from "
+                'the dashboard (Settings > Robots), not a friendly name/slug'
+            )
+            raise ValueError('robot_id must be a valid UUID')
 
         self.headers = {'x-api-key': self.api_key, 'Content-Type': 'application/json'}
 
