@@ -1,0 +1,18 @@
+# ROS 1 params file — load with <rosparam file="..." command="load" /> inside
+# a namespaced <node> block, or reference individual values with rospy.get_param.
+# Unlike ROS 2, there's no ros__parameters: nesting — these load directly into
+# the node's private (~) namespace when loaded inside its <node> tag.
+api_url: "https://www.bbrobotics.in/api"
+api_key: ""
+robot_id: ""
+max_observations: 1000
+observation_interval_ms: 100
+# Override these if your robot uses different topic names
+joint_states_topic: "joint_states"
+ft_sensor_topic: "ft_sensor"
+gripper_topic: "gripper/state"
+# Optional: extra std_msgs/Float64 scalar sensors beyond the three above —
+# "topic:field_name,topic:field_name". Each shows up under that field name
+# in every observation's sensor_data. Leave empty if you don't need this.
+# extra_float_topics: "/motor_temp:temperature,/battery/voltage:battery_voltage"
+extra_float_topics: ""

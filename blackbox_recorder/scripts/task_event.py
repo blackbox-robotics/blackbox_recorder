@@ -1,0 +1,3 @@
+#!/usr/bin/env python3
+from blackbox_recorder.task_event_helper import main
+main()

@@ -1,0 +1,27 @@
+<launch>
+  <arg name="api_url" default="https://www.bbrobotics.in/api" />
+  <arg name="api_key" default="" />
+  <arg name="robot_id" default="" />
+  <arg name="observation_interval_ms" default="100" />
+  <arg name="joint_states_topic" default="joint_states" />
+  <arg name="ft_sensor_topic" default="ft_sensor" />
+  <arg name="gripper_topic" default="gripper/state" />
+  <arg name="extra_float_topics" default="" />
+  <!-- Namespace this recorder — set per-robot when running multiple on one
+       machine (see multi_recorder_launch.sh). Relative topics above then
+       resolve to /<ns>/joint_states, /<ns>/blackbox/task_event, etc. -->
+  <arg name="ns" default="" />
+
+  <group ns="$(arg ns)">
+    <node name="blackbox_episode_recorder" pkg="blackbox_recorder" type="episode_recorder" output="screen">
+      <param name="api_url" value="$(arg api_url)" />
+      <param name="api_key" value="$(arg api_key)" />
+      <param name="robot_id" value="$(arg robot_id)" />
+      <param name="observation_interval_ms" value="$(arg observation_interval_ms)" />
+      <param name="joint_states_topic" value="$(arg joint_states_topic)" />
+      <param name="ft_sensor_topic" value="$(arg ft_sensor_topic)" />
+      <param name="gripper_topic" value="$(arg gripper_topic)" />
+      <param name="extra_float_topics" value="$(arg extra_float_topics)" />
+    </node>
+  </group>
+</launch>
