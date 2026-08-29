@@ -22,6 +22,8 @@ Publishes:
 
 import json
 import os
+import queue
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +56,14 @@ class EpisodeRecorder(object):
         self.obs_interval_ms = int(rospy.get_param('~observation_interval_ms', 100))
         self.offline_mode = bool(rospy.get_param('~offline_mode', False))
         self.export_dir = rospy.get_param('~export_dir', os.path.expanduser('~/.blackbox/exports'))
+
+        # Stream each observation to the dashboard as it's collected instead of
+        # only uploading the whole episode at the end — real-time graphing
+        # while a session is still recording. Additive: buffering + the
+        # end-of-episode path below are unchanged and remain the fallback
+        # whenever this can't reach the backend. Meaningless (and forced off)
+        # under offline_mode, which has no backend to stream to.
+        self.live_stream_enabled = bool(rospy.get_param('~live_stream_enabled', True)) and not self.offline_mode
 
         self.joint_states_topic = rospy.get_param('~joint_states_topic', 'joint_states')
         self.ft_sensor_topic = rospy.get_param('~ft_sensor_topic', 'ft_sensor')
@@ -115,6 +125,22 @@ class EpisodeRecorder(object):
         self.actions = []
         self.metadata = {}
 
+        # Live-streaming: set once /episodes/start succeeds for the current
+        # episode, cleared on end. None means "not streaming this episode" —
+        # either live_stream_enabled is off, or the start call failed — in
+        # which case behavior is identical to before this feature existed.
+        self.live_episode_id = None  # type: Optional[str]
+
+        # Observation POSTs run on a background thread so a slow/dead network
+        # can never stall the observation-collection timer. Bounded and
+        # drop-oldest under overload — the local buffer flushed in
+        # collect_observation() is the durable copy regardless of whether any
+        # of this succeeds.
+        self._live_queue = queue.Queue(maxsize=200)
+        self._live_worker = threading.Thread(target=self._live_worker_loop)
+        self._live_worker.daemon = True
+        self._live_worker.start()
+
         # Latest sensor values
         self.latest_joint_state = None  # type: Optional[dict]
         self.latest_ft = None  # type: Optional[dict]
@@ -147,8 +173,9 @@ class EpisodeRecorder(object):
         extra_topics_str = ', '.join('%s->%s' % (t, f) for t, f in self.extra_float_topics) or 'none'
         rospy.loginfo(
             'Black Box Episode Recorder initialized (ROS 1) — robot_id=%s, api=%s, '
-            'interval=%dms | topics: joints=%s ft=%s gripper=%s extra=[%s]' % (
+            'interval=%dms, live_stream=%s | topics: joints=%s ft=%s gripper=%s extra=[%s]' % (
                 self.robot_id, self.api_url, self.obs_interval_ms,
+                'on' if self.live_stream_enabled else 'off',
                 self.joint_states_topic, self.ft_sensor_topic, self.gripper_topic,
                 extra_topics_str,
             )
@@ -196,11 +223,14 @@ class EpisodeRecorder(object):
         if event == 'start':
             self.start_episode(data.get('task_id', 'unknown'), data.get('metadata', {}))
         elif event == 'action' and self.recording:
-            self.actions.append({
+            action = {
                 'timestamp': datetime.now(timezone.utc).isoformat(),
                 'action_type': data.get('action_type', 'unknown'),
                 'parameters': data.get('parameters', {}),
-            })
+            }
+            self.actions.append(action)
+            if self.live_episode_id:
+                self._post_live_action(self.live_episode_id, action)
         elif event == 'end':
             self.end_episode(data.get('success'))
 
@@ -215,9 +245,16 @@ class EpisodeRecorder(object):
         self.observations = []
         self.actions = []
         self.metadata = metadata
+        self.live_episode_id = None
+
+        if self.live_stream_enabled:
+            self.live_episode_id = self._start_live_episode(task_id, self.episode_start)
 
         self.publish_status('recording', task_id)
-        rospy.loginfo('Episode started — task=%s' % task_id)
+        if self.live_episode_id:
+            rospy.loginfo('Episode started — task=%s, live_episode_id=%s' % (task_id, self.live_episode_id))
+        else:
+            rospy.loginfo('Episode started — task=%s (buffering locally, no live stream)' % task_id)
 
     def collect_observation(self, event=None):
         if not self.recording:
@@ -246,6 +283,9 @@ class EpisodeRecorder(object):
         self.observations.append(obs)
         self._flush_buffer()
 
+        if self.live_episode_id:
+            self._queue_live_observation(self.live_episode_id, obs)
+
     def end_episode(self, success):
         if not self.recording:
             rospy.logwarn('Not recording — ignoring end event')
@@ -253,6 +293,8 @@ class EpisodeRecorder(object):
 
         self.recording = False
         end_time = datetime.now(timezone.utc).isoformat()
+        live_episode_id = self.live_episode_id
+        self.live_episode_id = None
 
         episode_data = {
             'robot_id': self.robot_id,
@@ -271,7 +313,22 @@ class EpisodeRecorder(object):
             )
         )
 
-        self.push_episode(episode_data)
+        if live_episode_id:
+            # Observations/actions already streamed in one at a time —
+            # finish the existing episode rather than uploading it again,
+            # which would duplicate everything that already made it live.
+            if self._finish_live_episode(live_episode_id, end_time, success):
+                self._delete_buffer()
+            else:
+                rospy.logerr(
+                    'Could not finish live episode %s — it will stay shown as RECORDING on '
+                    'the dashboard until closed manually (PATCH %s/episodes/%s/finish)' % (
+                        live_episode_id, self.api_url, live_episode_id,
+                    )
+                )
+        else:
+            self.push_episode(episode_data)
+
         self.publish_status('idle', self.current_task_id or '')
 
     # ------------------------------------------------------------------
@@ -289,6 +346,10 @@ class EpisodeRecorder(object):
                 'metadata': self.metadata,
                 'observations': self.observations,
                 'actions': self.actions,
+                # Recorded so a crash-recovered buffer can tell _recover_buffer
+                # whether this episode already has a row (and observations)
+                # server-side — see _recover_buffer for why that matters.
+                'live_episode_id': self.live_episode_id,
             }
             tmp = self.BUFFER_PATH.with_suffix('.tmp')
             tmp.write_text(json.dumps(buf))
@@ -307,15 +368,43 @@ class EpisodeRecorder(object):
         """On startup, try to re-upload a leftover buffer from a previous crash."""
         if not self.BUFFER_PATH.exists():
             return
-        rospy.loginfo('Found leftover episode buffer — attempting re-upload')
+        rospy.loginfo('Found leftover episode buffer — attempting recovery')
         try:
             data = json.loads(self.BUFFER_PATH.read_text())
-            # Fill in end_time as unknown since the previous run crashed
-            data.setdefault('end_time', None)
-            data.setdefault('success', None)
-            self._upload_episode(data, from_recovery=True)
         except (ValueError, OSError) as e:
             rospy.logwarn('Could not read leftover buffer: %s' % e)
+            return
+
+        live_episode_id = data.pop('live_episode_id', None)
+        if live_episode_id:
+            # This episode's observations/actions already made it to the
+            # server one at a time before the crash — only the finish call
+            # was missed. Re-uploading the buffer as a new episode would
+            # duplicate every one of them, so just close out the existing
+            # episode instead of going through _upload_episode at all.
+            rospy.loginfo(
+                'Buffer belongs to already-live-streamed episode %s — finishing it, not '
+                're-uploading' % live_episode_id
+            )
+            # end_time is unknown (crashed before the end event) — best
+            # approximation is recovery time, not the actual session end.
+            recovered_end_time = datetime.now(timezone.utc).isoformat()
+            if self._finish_live_episode(live_episode_id, recovered_end_time, None):
+                self._delete_buffer()
+            else:
+                rospy.logerr(
+                    'Could not finish live episode %s after recovery — it will stay shown as '
+                    'RECORDING until closed manually (PATCH %s/episodes/%s/finish)' % (
+                        live_episode_id, self.api_url, live_episode_id,
+                    )
+                )
+            return
+
+        # No live episode was ever started for this buffer — same recovery
+        # path as before this feature existed.
+        data.setdefault('end_time', None)
+        data.setdefault('success', None)
+        self._upload_episode(data, from_recovery=True)
 
     # ------------------------------------------------------------------
     # Upload helpers
@@ -356,6 +445,103 @@ class EpisodeRecorder(object):
         zip_path, session_id = export_offline_session(data, self.export_dir)
         rospy.loginfo('Offline session exported: %s (session_id=%s)' % (zip_path, session_id))
         self._delete_buffer()
+
+    # ------------------------------------------------------------------
+    # Live streaming — best-effort, additive. Every method here fails
+    # silently into "keep using the local buffer" rather than ever raising;
+    # a dead network must never interrupt recording.
+    # ------------------------------------------------------------------
+
+    def _start_live_episode(self, task_id, start_time):
+        """POST /episodes/start. Short timeout — this runs once per episode
+        on the ROS callback thread, not the hot observation-collection path,
+        so a brief block here is acceptable."""
+        try:
+            resp = requests.post(
+                '%s/episodes/start' % self.api_url,
+                json={'robot_id': self.robot_id, 'task_id': task_id, 'start_time': start_time},
+                headers=self.headers,
+                timeout=3,
+            )
+            if resp.status_code == 201:
+                return resp.json().get('data', {}).get('id')
+            rospy.logwarn(
+                'Live episode start failed (%d) — this episode will only appear on the '
+                'dashboard once it ends' % resp.status_code
+            )
+        except requests.RequestException as e:
+            rospy.logwarn(
+                'Live episode start failed (%s) — this episode will only appear on the '
+                'dashboard once it ends' % e
+            )
+        return None
+
+    def _finish_live_episode(self, episode_id, end_time, success):
+        """PATCH /episodes/:id/finish. Returns True on success."""
+        try:
+            resp = requests.patch(
+                '%s/episodes/%s/finish' % (self.api_url, episode_id),
+                json={'end_time': end_time, 'success': success},
+                headers=self.headers,
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                rospy.loginfo('Live episode finished — id=%s' % episode_id)
+                return True
+            rospy.logerr('Failed to finish live episode %s: %d — %s' % (episode_id, resp.status_code, resp.text))
+        except requests.RequestException as e:
+            rospy.logerr('Failed to finish live episode %s: %s' % (episode_id, e))
+        return False
+
+    def _queue_live_observation(self, episode_id, obs):
+        """Non-blocking — hands off to the background worker thread. Drops
+        the oldest queued point rather than blocking if the backend can't
+        keep up; _flush_buffer() already made this observation durable
+        locally regardless of whether it ever makes it live."""
+        item = (episode_id, obs)
+        try:
+            self._live_queue.put_nowait(item)
+        except queue.Full:
+            try:
+                self._live_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._live_queue.put_nowait(item)
+            except queue.Full:
+                pass
+
+    def _live_worker_loop(self):
+        """Runs for the lifetime of the node. One POST per queued observation;
+        failures are logged at debug level and dropped — never retried, since
+        a retry queue for a per-observation stream isn't worth the complexity
+        the local buffer already gives every observation a durable copy."""
+        while True:
+            episode_id, obs = self._live_queue.get()
+            try:
+                requests.post(
+                    '%s/episodes/%s/observations' % (self.api_url, episode_id),
+                    json=obs,
+                    headers=self.headers,
+                    timeout=5,
+                )
+            except requests.RequestException as e:
+                rospy.logdebug('Live observation POST failed (non-fatal): %s' % e)
+            self._live_queue.task_done()
+
+    def _post_live_action(self, episode_id, action):
+        """Actions are rare (task-level events, not per-tick sensor data) so
+        a direct short-timeout call is fine — no need for the background
+        queue collect_observation() uses."""
+        try:
+            requests.post(
+                '%s/episodes/%s/actions' % (self.api_url, episode_id),
+                json=action,
+                headers=self.headers,
+                timeout=3,
+            )
+        except requests.RequestException as e:
+            rospy.logwarn('Live action POST failed (non-fatal, action stays in local buffer): %s' % e)
 
     def publish_status(self, state, task_id):
         msg = String()

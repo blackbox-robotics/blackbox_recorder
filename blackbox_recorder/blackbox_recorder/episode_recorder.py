@@ -17,6 +17,8 @@ Publishes:
 
 import json
 import os
+import queue
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +52,14 @@ class EpisodeRecorder(Node):
         self.declare_parameter('offline_mode', False)
         self.declare_parameter('export_dir', os.path.expanduser('~/.blackbox/exports'))
 
+        # Stream each observation to the dashboard as it's collected instead of
+        # only uploading the whole episode at the end — real-time graphing
+        # while a session is still recording. Additive: buffering + the
+        # end-of-episode path below are unchanged and remain the fallback
+        # whenever this can't reach the backend. Meaningless (and forced off)
+        # under offline_mode, which has no backend to stream to.
+        self.declare_parameter('live_stream_enabled', True)
+
         self.declare_parameter('joint_states_topic', 'joint_states')
         self.declare_parameter('ft_sensor_topic', 'ft_sensor')
         self.declare_parameter('gripper_topic', 'gripper/state')
@@ -68,6 +78,10 @@ class EpisodeRecorder(Node):
         self.obs_interval_ms = self.get_parameter('observation_interval_ms').get_parameter_value().integer_value
         self.offline_mode = self.get_parameter('offline_mode').get_parameter_value().bool_value
         self.export_dir = self.get_parameter('export_dir').get_parameter_value().string_value
+        self.live_stream_enabled = (
+            self.get_parameter('live_stream_enabled').get_parameter_value().bool_value
+            and not self.offline_mode
+        )
         self.joint_states_topic = self.get_parameter('joint_states_topic').get_parameter_value().string_value
         self.ft_sensor_topic = self.get_parameter('ft_sensor_topic').get_parameter_value().string_value
         self.gripper_topic = self.get_parameter('gripper_topic').get_parameter_value().string_value
@@ -122,6 +136,21 @@ class EpisodeRecorder(Node):
         self.actions: list = []
         self.metadata: dict = {}
 
+        # Live-streaming: set once /episodes/start succeeds for the current
+        # episode, cleared on end. None means "not streaming this episode" —
+        # either live_stream_enabled is off, or the start call failed — in
+        # which case behavior is identical to before this feature existed.
+        self.live_episode_id: Optional[str] = None
+
+        # Observation POSTs run on a background thread so a slow/dead network
+        # can never stall the observation-collection timer. Bounded and
+        # drop-oldest under overload — the local buffer flushed in
+        # collect_observation() is the durable copy regardless of whether any
+        # of this succeeds.
+        self._live_queue: "queue.Queue" = queue.Queue(maxsize=200)
+        self._live_worker = threading.Thread(target=self._live_worker_loop, daemon=True)
+        self._live_worker.start()
+
         # Latest sensor values
         self.latest_joint_state: Optional[dict] = None
         self.latest_ft: Optional[dict] = None
@@ -159,7 +188,8 @@ class EpisodeRecorder(Node):
         extra_topics_str = ', '.join(f'{t}->{f}' for t, f in self.extra_float_topics) or 'none'
         self.get_logger().info(
             f'Black Box Episode Recorder initialized — robot_id={self.robot_id}, '
-            f'api={self.api_url}, interval={self.obs_interval_ms}ms | '
+            f'api={self.api_url}, interval={self.obs_interval_ms}ms, '
+            f'live_stream={"on" if self.live_stream_enabled else "off"} | '
             f'topics: joints={self.joint_states_topic} ft={self.ft_sensor_topic} '
             f'gripper={self.gripper_topic} extra=[{extra_topics_str}]'
         )
@@ -206,11 +236,14 @@ class EpisodeRecorder(Node):
         if event == 'start':
             self.start_episode(data.get('task_id', 'unknown'), data.get('metadata', {}))
         elif event == 'action' and self.recording:
-            self.actions.append({
+            action = {
                 'timestamp': datetime.now(timezone.utc).isoformat(),
                 'action_type': data.get('action_type', 'unknown'),
                 'parameters': data.get('parameters', {}),
-            })
+            }
+            self.actions.append(action)
+            if self.live_episode_id:
+                self._post_live_action(self.live_episode_id, action)
         elif event == 'end':
             self.end_episode(data.get('success'))
 
@@ -225,9 +258,16 @@ class EpisodeRecorder(Node):
         self.observations = []
         self.actions = []
         self.metadata = metadata
+        self.live_episode_id = None
+
+        if self.live_stream_enabled:
+            self.live_episode_id = self._start_live_episode(task_id, self.episode_start)
 
         self.publish_status('recording', task_id)
-        self.get_logger().info(f'Episode started — task={task_id}')
+        if self.live_episode_id:
+            self.get_logger().info(f'Episode started — task={task_id}, live_episode_id={self.live_episode_id}')
+        else:
+            self.get_logger().info(f'Episode started — task={task_id} (buffering locally, no live stream)')
 
     def _ros_time_sec(self) -> float:
         """Return the current ROS clock time in seconds (float)."""
@@ -260,6 +300,9 @@ class EpisodeRecorder(Node):
         self.observations.append(obs)
         self._flush_buffer()
 
+        if self.live_episode_id:
+            self._queue_live_observation(self.live_episode_id, obs)
+
     def end_episode(self, success: Optional[bool]):
         if not self.recording:
             self.get_logger().warn('Not recording — ignoring end event')
@@ -267,6 +310,8 @@ class EpisodeRecorder(Node):
 
         self.recording = False
         end_time = datetime.now(timezone.utc).isoformat()
+        live_episode_id = self.live_episode_id
+        self.live_episode_id = None
 
         episode_data = {
             'robot_id': self.robot_id,
@@ -285,7 +330,21 @@ class EpisodeRecorder(Node):
             f'success={success}'
         )
 
-        self.push_episode(episode_data)
+        if live_episode_id:
+            # Observations/actions already streamed in one at a time — finish
+            # the existing episode rather than uploading it again, which
+            # would duplicate everything that already made it live.
+            if self._finish_live_episode(live_episode_id, end_time, success):
+                self._delete_buffer()
+            else:
+                self.get_logger().error(
+                    f'Could not finish live episode {live_episode_id} — it will stay shown as '
+                    f'RECORDING on the dashboard until closed manually '
+                    f'(PATCH {self.api_url}/episodes/{live_episode_id}/finish)'
+                )
+        else:
+            self.push_episode(episode_data)
+
         self.publish_status('idle', self.current_task_id or '')
 
     # ------------------------------------------------------------------
@@ -302,6 +361,10 @@ class EpisodeRecorder(Node):
                 'metadata': self.metadata,
                 'observations': self.observations,
                 'actions': self.actions,
+                # Recorded so a crash-recovered buffer can tell _recover_buffer
+                # whether this episode already has a row (and observations)
+                # server-side — see _recover_buffer for why that matters.
+                'live_episode_id': self.live_episode_id,
             }
             tmp = self.BUFFER_PATH.with_suffix('.tmp')
             tmp.write_text(json.dumps(buf))
@@ -320,15 +383,42 @@ class EpisodeRecorder(Node):
         """On startup, try to re-upload a leftover buffer from a previous crash."""
         if not self.BUFFER_PATH.exists():
             return
-        self.get_logger().info('Found leftover episode buffer — attempting re-upload')
+        self.get_logger().info('Found leftover episode buffer — attempting recovery')
         try:
             data = json.loads(self.BUFFER_PATH.read_text())
-            # Fill in end_time as unknown since the previous run crashed
-            data.setdefault('end_time', None)
-            data.setdefault('success', None)
-            self._upload_episode(data, from_recovery=True)
         except (json.JSONDecodeError, OSError) as e:
             self.get_logger().warn(f'Could not read leftover buffer: {e}')
+            return
+
+        live_episode_id = data.pop('live_episode_id', None)
+        if live_episode_id:
+            # This episode's observations/actions already made it to the
+            # server one at a time before the crash — only the finish call
+            # was missed. Re-uploading the buffer as a new episode would
+            # duplicate every one of them, so just close out the existing
+            # episode instead of going through _upload_episode at all.
+            self.get_logger().info(
+                f'Buffer belongs to already-live-streamed episode {live_episode_id} — '
+                f'finishing it, not re-uploading'
+            )
+            # end_time is unknown (crashed before the end event) — best
+            # approximation is recovery time, not the actual session end.
+            recovered_end_time = datetime.now(timezone.utc).isoformat()
+            if self._finish_live_episode(live_episode_id, recovered_end_time, None):
+                self._delete_buffer()
+            else:
+                self.get_logger().error(
+                    f'Could not finish live episode {live_episode_id} after recovery — it will '
+                    f'stay shown as RECORDING until closed manually '
+                    f'(PATCH {self.api_url}/episodes/{live_episode_id}/finish)'
+                )
+            return
+
+        # No live episode was ever started for this buffer — same recovery
+        # path as before this feature existed.
+        data.setdefault('end_time', None)
+        data.setdefault('success', None)
+        self._upload_episode(data, from_recovery=True)
 
     # ------------------------------------------------------------------
     # Upload helpers
@@ -371,6 +461,103 @@ class EpisodeRecorder(Node):
         zip_path, session_id = export_offline_session(data, self.export_dir)
         self.get_logger().info(f'Offline session exported: {zip_path} (session_id={session_id})')
         self._delete_buffer()
+
+    # ------------------------------------------------------------------
+    # Live streaming — best-effort, additive. Every method here fails
+    # silently into "keep using the local buffer" rather than ever raising;
+    # a dead network must never interrupt recording.
+    # ------------------------------------------------------------------
+
+    def _start_live_episode(self, task_id: str, start_time: str) -> Optional[str]:
+        """POST /episodes/start. Short timeout — this runs once per episode
+        on the ROS callback thread, not the hot observation-collection path,
+        so a brief block here is acceptable."""
+        try:
+            resp = requests.post(
+                f'{self.api_url}/episodes/start',
+                json={'robot_id': self.robot_id, 'task_id': task_id, 'start_time': start_time},
+                headers=self.headers,
+                timeout=3,
+            )
+            if resp.status_code == 201:
+                return resp.json().get('data', {}).get('id')
+            self.get_logger().warn(
+                f'Live episode start failed ({resp.status_code}) — this episode will only '
+                f'appear on the dashboard once it ends'
+            )
+        except requests.RequestException as e:
+            self.get_logger().warn(
+                f'Live episode start failed ({e}) — this episode will only appear on the '
+                f'dashboard once it ends'
+            )
+        return None
+
+    def _finish_live_episode(self, episode_id: str, end_time: str, success: Optional[bool]) -> bool:
+        """PATCH /episodes/:id/finish. Returns True on success."""
+        try:
+            resp = requests.patch(
+                f'{self.api_url}/episodes/{episode_id}/finish',
+                json={'end_time': end_time, 'success': success},
+                headers=self.headers,
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                self.get_logger().info(f'Live episode finished — id={episode_id}')
+                return True
+            self.get_logger().error(f'Failed to finish live episode {episode_id}: {resp.status_code} — {resp.text}')
+        except requests.RequestException as e:
+            self.get_logger().error(f'Failed to finish live episode {episode_id}: {e}')
+        return False
+
+    def _queue_live_observation(self, episode_id: str, obs: dict):
+        """Non-blocking — hands off to the background worker thread. Drops
+        the oldest queued point rather than blocking if the backend can't
+        keep up; _flush_buffer() already made this observation durable
+        locally regardless of whether it ever makes it live."""
+        item = (episode_id, obs)
+        try:
+            self._live_queue.put_nowait(item)
+        except queue.Full:
+            try:
+                self._live_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._live_queue.put_nowait(item)
+            except queue.Full:
+                pass
+
+    def _live_worker_loop(self):
+        """Runs for the lifetime of the node. One POST per queued observation;
+        failures are logged at debug level and dropped — never retried, since
+        a retry queue for a per-observation stream isn't worth the complexity
+        the local buffer already gives every observation a durable copy."""
+        while True:
+            episode_id, obs = self._live_queue.get()
+            try:
+                requests.post(
+                    f'{self.api_url}/episodes/{episode_id}/observations',
+                    json=obs,
+                    headers=self.headers,
+                    timeout=5,
+                )
+            except requests.RequestException as e:
+                self.get_logger().debug(f'Live observation POST failed (non-fatal): {e}')
+            self._live_queue.task_done()
+
+    def _post_live_action(self, episode_id: str, action: dict):
+        """Actions are rare (task-level events, not per-tick sensor data) so
+        a direct short-timeout call is fine — no need for the background
+        queue collect_observation() uses."""
+        try:
+            requests.post(
+                f'{self.api_url}/episodes/{episode_id}/actions',
+                json=action,
+                headers=self.headers,
+                timeout=3,
+            )
+        except requests.RequestException as e:
+            self.get_logger().warn(f'Live action POST failed (non-fatal, action stays in local buffer): {e}')
 
     def publish_status(self, state: str, task_id: str):
         msg = String()
