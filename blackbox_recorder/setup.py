@@ -18,7 +18,7 @@ setup(
     maintainer='Black Box Robotics',
     maintainer_email='support@blackrobotics.in',
     description='Black Box Robotics episode recorder for ROS 2 robots',
-    license='MIT',
+    license='Proprietary',
     entry_points={
         'console_scripts': [
             'episode_recorder = blackbox_recorder.episode_recorder:main',

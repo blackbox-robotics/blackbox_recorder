@@ -3,6 +3,13 @@
   <arg name="api_key" default="" />
   <arg name="robot_id" default="" />
   <arg name="observation_interval_ms" default="100" />
+  <arg name="offline_mode" default="false" />
+  <arg name="export_dir" default="$(env HOME)/.blackbox/exports" />
+  <arg name="live_stream_enabled" default="true" />
+  <arg name="mavlink_upload_enabled" default="false" />
+  <arg name="mavlink_connection" default="" />
+  <arg name="mavlink_source_system" default="42" />
+  <arg name="mavlink_batch_interval_s" default="2.0" />
   <arg name="joint_states_topic" default="joint_states" />
   <arg name="ft_sensor_topic" default="ft_sensor" />
   <arg name="gripper_topic" default="gripper/state" />
@@ -18,6 +25,13 @@
       <param name="api_key" value="$(arg api_key)" />
       <param name="robot_id" value="$(arg robot_id)" />
       <param name="observation_interval_ms" value="$(arg observation_interval_ms)" />
+      <param name="offline_mode" value="$(arg offline_mode)" />
+      <param name="export_dir" value="$(arg export_dir)" />
+      <param name="live_stream_enabled" value="$(arg live_stream_enabled)" />
+      <param name="mavlink_upload_enabled" value="$(arg mavlink_upload_enabled)" />
+      <param name="mavlink_connection" value="$(arg mavlink_connection)" />
+      <param name="mavlink_source_system" value="$(arg mavlink_source_system)" />
+      <param name="mavlink_batch_interval_s" value="$(arg mavlink_batch_interval_s)" />
       <param name="joint_states_topic" value="$(arg joint_states_topic)" />
       <param name="ft_sensor_topic" value="$(arg ft_sensor_topic)" />
       <param name="gripper_topic" value="$(arg gripper_topic)" />

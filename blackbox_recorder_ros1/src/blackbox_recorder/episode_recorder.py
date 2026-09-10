@@ -24,6 +24,7 @@ import json
 import os
 import queue
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,13 +58,38 @@ class EpisodeRecorder(object):
         self.offline_mode = bool(rospy.get_param('~offline_mode', False))
         self.export_dir = rospy.get_param('~export_dir', os.path.expanduser('~/.blackbox/exports'))
 
+        # MAVLink upload: for a vehicle whose only live channel is the
+        # MAVLink radio, with no separate internet path of its own. Recording
+        # is completely unchanged — the recorder always writes the same
+        # session zip via export_offline_session() it would in offline_mode.
+        # The difference is what happens to that zip next: instead of sitting
+        # in export_dir until someone physically retrieves it, a background
+        # worker pushes it out over the SAME MAVLink link (MAVLink FTP write
+        # — https://mavlink.io/en/services/ftp.html) to a ground-station
+        # receiver (mavlink_upload_receiver.py) that imports it as it
+        # arrives. Requires pymavlink — not a hard dependency of the package,
+        # only imported if this is enabled.
+        self.mavlink_upload_enabled = bool(rospy.get_param('~mavlink_upload_enabled', False))
+        self.mavlink_connection = rospy.get_param('~mavlink_connection', '')
+        self.mavlink_source_system = int(rospy.get_param('~mavlink_source_system', 42))
+        # How often, while an episode is open, to push whatever's accumulated
+        # since the last push — the MAVLink-transport equivalent of
+        # live_stream_enabled's per-observation HTTP POSTs. MAVLink FTP is a
+        # whole-file transfer with real per-transfer overhead, so this batches
+        # into small periodic files rather than one file per observation.
+        self.mavlink_batch_interval_s = float(rospy.get_param('~mavlink_batch_interval_s', 2.0))
+        # Both mean "this vehicle has no direct path to the API" — offline_mode
+        # leaves the zip for physical retrieval, mavlink_upload_enabled pushes
+        # it out over the radio instead. Either way, never attempt HTTP.
+        self.no_internet = self.offline_mode or self.mavlink_upload_enabled
+
         # Stream each observation to the dashboard as it's collected instead of
         # only uploading the whole episode at the end — real-time graphing
         # while a session is still recording. Additive: buffering + the
         # end-of-episode path below are unchanged and remain the fallback
         # whenever this can't reach the backend. Meaningless (and forced off)
-        # under offline_mode, which has no backend to stream to.
-        self.live_stream_enabled = bool(rospy.get_param('~live_stream_enabled', True)) and not self.offline_mode
+        # when this vehicle has no direct API path at all.
+        self.live_stream_enabled = bool(rospy.get_param('~live_stream_enabled', True)) and not self.no_internet
 
         self.joint_states_topic = rospy.get_param('~joint_states_topic', 'joint_states')
         self.ft_sensor_topic = rospy.get_param('~ft_sensor_topic', 'ft_sensor')
@@ -76,10 +102,20 @@ class EpisodeRecorder(object):
         # default — no behavior change if unset.
         extra_float_topics_raw = rospy.get_param('~extra_float_topics', '')
 
-        # api_key isn't meaningful in offline mode — nothing gets POSTed
-        if not self.robot_id or (not self.offline_mode and not self.api_key):
-            rospy.logerr('robot_id is required (api_key also required unless offline_mode:=true)')
+        # api_key isn't meaningful when this vehicle never calls the API directly
+        if not self.robot_id or (not self.no_internet and not self.api_key):
+            rospy.logerr(
+                'robot_id is required (api_key also required unless offline_mode:=true or mavlink_upload_enabled:=true)'
+            )
             raise ValueError('Missing required parameters')
+
+        if self.mavlink_upload_enabled and not self.mavlink_connection:
+            rospy.logerr(
+                'mavlink_upload_enabled is true but mavlink_connection is empty — set it to the '
+                "link this companion computer uses to reach the ground station, e.g. "
+                "'udpout:<ground-ip>:14552' or a serial device"
+            )
+            raise ValueError('mavlink_connection is required when mavlink_upload_enabled is true')
 
         # robot_id must be the robot's dashboard UUID (Settings > Robots), not a
         # friendly name — the backend validates it as a UUID and rejects anything
@@ -141,6 +177,28 @@ class EpisodeRecorder(object):
         self._live_worker.daemon = True
         self._live_worker.start()
 
+        # MAVLink upload worker: carries both the live batch files below and
+        # the full end-of-episode zip (crash-recovery case only — see
+        # _upload_episode). Unbounded — these are small, infrequent files,
+        # not per-observation, so no drop-oldest pressure like the live
+        # queue above. Single-threaded, so uploads happen strictly in order.
+        self._mavlink_upload_queue = queue.Queue()
+        if self.mavlink_upload_enabled:
+            self._mavlink_upload_worker = threading.Thread(target=self._mavlink_upload_worker_loop)
+            self._mavlink_upload_worker.daemon = True
+            self._mavlink_upload_worker.start()
+
+        # MAVLink live batching: the MAVLink-transport equivalent of
+        # live_stream_enabled's per-observation HTTP POSTs (see
+        # _flush_mavlink_batch). mavlink_session_id is generated locally in
+        # start_episode() — unlike live_episode_id, there's no server call
+        # to get an ID from, since this vehicle has no direct API path.
+        self.mavlink_session_id = None  # type: Optional[str]
+        self._mavlink_pending_observations = []
+        self._mavlink_pending_actions = []
+        self._mavlink_batch_seq = 0
+        self._mavlink_batch_dir = os.path.join(self.export_dir, '.mavlink_batches')
+
         # Latest sensor values
         self.latest_joint_state = None  # type: Optional[dict]
         self.latest_ft = None  # type: Optional[dict]
@@ -170,12 +228,17 @@ class EpisodeRecorder(object):
         interval_sec = self.obs_interval_ms / 1000.0
         rospy.Timer(rospy.Duration(interval_sec), self.collect_observation)
 
+        if self.mavlink_upload_enabled:
+            rospy.Timer(rospy.Duration(self.mavlink_batch_interval_s), self._flush_mavlink_batch_timer_cb)
+
         extra_topics_str = ', '.join('%s->%s' % (t, f) for t, f in self.extra_float_topics) or 'none'
+        mavlink_upload_str = ('on (%s)' % self.mavlink_connection) if self.mavlink_upload_enabled else 'off'
         rospy.loginfo(
             'Black Box Episode Recorder initialized (ROS 1) — robot_id=%s, api=%s, '
-            'interval=%dms, live_stream=%s | topics: joints=%s ft=%s gripper=%s extra=[%s]' % (
+            'interval=%dms, live_stream=%s, mavlink_upload=%s | topics: joints=%s ft=%s gripper=%s extra=[%s]' % (
                 self.robot_id, self.api_url, self.obs_interval_ms,
                 'on' if self.live_stream_enabled else 'off',
+                mavlink_upload_str,
                 self.joint_states_topic, self.ft_sensor_topic, self.gripper_topic,
                 extra_topics_str,
             )
@@ -231,6 +294,8 @@ class EpisodeRecorder(object):
             self.actions.append(action)
             if self.live_episode_id:
                 self._post_live_action(self.live_episode_id, action)
+            if self.mavlink_session_id:
+                self._mavlink_pending_actions.append(action)
         elif event == 'end':
             self.end_episode(data.get('success'))
 
@@ -250,9 +315,17 @@ class EpisodeRecorder(object):
         if self.live_stream_enabled:
             self.live_episode_id = self._start_live_episode(task_id, self.episode_start)
 
+        if self.mavlink_upload_enabled:
+            self.mavlink_session_id = str(uuid.uuid4())
+            self._mavlink_pending_observations = []
+            self._mavlink_pending_actions = []
+            self._mavlink_batch_seq = 0
+
         self.publish_status('recording', task_id)
         if self.live_episode_id:
             rospy.loginfo('Episode started — task=%s, live_episode_id=%s' % (task_id, self.live_episode_id))
+        elif self.mavlink_session_id:
+            rospy.loginfo('Episode started — task=%s, mavlink_session_id=%s' % (task_id, self.mavlink_session_id))
         else:
             rospy.loginfo('Episode started — task=%s (buffering locally, no live stream)' % task_id)
 
@@ -285,6 +358,8 @@ class EpisodeRecorder(object):
 
         if self.live_episode_id:
             self._queue_live_observation(self.live_episode_id, obs)
+        if self.mavlink_session_id:
+            self._mavlink_pending_observations.append(obs)
 
     def end_episode(self, success):
         if not self.recording:
@@ -295,6 +370,10 @@ class EpisodeRecorder(object):
         end_time = datetime.now(timezone.utc).isoformat()
         live_episode_id = self.live_episode_id
         self.live_episode_id = None
+        # mavlink_session_id is intentionally NOT cleared yet — the final
+        # _flush_mavlink_batch call below needs it (see the elif branch),
+        # and clears it itself once that batch is queued.
+        mavlink_session_id = self.mavlink_session_id
 
         episode_data = {
             'robot_id': self.robot_id,
@@ -326,6 +405,14 @@ class EpisodeRecorder(object):
                         live_episode_id, self.api_url, live_episode_id,
                     )
                 )
+        elif mavlink_session_id:
+            # Same idea, over MAVLink: send the closing batch (any remaining
+            # pending observations/actions, plus end_time/success) so the
+            # ground receiver finishes the episode it opened on the first
+            # batch, then keep the local zip as a backup only — pushing it
+            # too would duplicate everything already delivered live.
+            self._flush_mavlink_batch(is_final=True, end_time=end_time, success=success)
+            self.push_episode(episode_data, already_live_batched=True)
         else:
             self.push_episode(episode_data)
 
@@ -350,6 +437,7 @@ class EpisodeRecorder(object):
                 # whether this episode already has a row (and observations)
                 # server-side — see _recover_buffer for why that matters.
                 'live_episode_id': self.live_episode_id,
+                'mavlink_session_id': self.mavlink_session_id,
             }
             tmp = self.BUFFER_PATH.with_suffix('.tmp')
             tmp.write_text(json.dumps(buf))
@@ -400,6 +488,44 @@ class EpisodeRecorder(object):
                 )
             return
 
+        mavlink_session_id = data.pop('mavlink_session_id', None)
+        if mavlink_session_id and self.mavlink_upload_enabled:
+            # Same idea as live_episode_id above, over MAVLink: the ground
+            # receiver already opened this episode from earlier batches, so
+            # re-uploading the full buffer would duplicate them. Send only a
+            # closing batch — any observations collected between the last
+            # periodic flush and the crash are lost (bounded by
+            # mavlink_batch_interval_s), but nothing already delivered is
+            # duplicated, and the episode doesn't get stuck open forever.
+            rospy.loginfo(
+                'Buffer belongs to already-live-batched MAVLink session %s — sending closing '
+                'batch only, not re-uploading' % mavlink_session_id
+            )
+            recovered_end_time = datetime.now(timezone.utc).isoformat()
+            try:
+                if not os.path.isdir(self._mavlink_batch_dir):
+                    os.makedirs(self._mavlink_batch_dir)
+                batch_path = os.path.join(self._mavlink_batch_dir, 'livebatch_%s_recovery.json' % mavlink_session_id)
+                with open(batch_path, 'w') as f:
+                    json.dump({
+                        'session_id': mavlink_session_id,
+                        'robot_id': data.get('robot_id'),
+                        'task_id': data.get('task_id'),
+                        'start_time': data.get('start_time'),
+                        'metadata': data.get('metadata', {}),
+                        'seq': 0,
+                        'is_final': True,
+                        'observations': [],
+                        'actions': [],
+                        'end_time': recovered_end_time,
+                        'success': None,
+                    }, f)
+                self._mavlink_upload_queue.put(batch_path)
+            except OSError as e:
+                rospy.logerr('Failed to write MAVLink recovery closing batch: %s' % e)
+            self._delete_buffer()
+            return
+
         # No live episode was ever started for this buffer — same recovery
         # path as before this feature existed.
         data.setdefault('end_time', None)
@@ -410,22 +536,32 @@ class EpisodeRecorder(object):
     # Upload helpers
     # ------------------------------------------------------------------
 
-    def push_episode(self, data):
+    def push_episode(self, data, already_live_batched=False):
         """Push completed episode to the Black Box Robotics API."""
         # Ensure the final state is flushed to disk before uploading
         self._flush_buffer()
-        self._upload_episode(data, from_recovery=False)
+        self._upload_episode(data, from_recovery=False, already_live_batched=already_live_batched)
 
-    def _upload_episode(self, data, from_recovery):
+    def _upload_episode(self, data, from_recovery, already_live_batched=False):
         """
-        POSTs episode data, unless offline_mode is set. On any failure (or in
-        offline_mode), falls back to a durable session zip via the same
-        offline_export module rosbag_exporter uses — same pipeline either way,
-        network or none. This replaces the old /tmp-buffer-only fallback: a
-        zip survives a power-cycle and can be physically moved off the drone,
-        which a /tmp file cannot.
+        POSTs episode data, unless offline_mode or mavlink_upload_enabled is
+        set. On any failure (or when this vehicle has no direct API path at
+        all), falls back to a durable session zip via the same offline_export
+        module rosbag_exporter uses — same pipeline either way. This replaces
+        the old /tmp-buffer-only fallback: a zip survives a power-cycle and
+        can be physically moved off the drone, which a /tmp file cannot.
+
+        already_live_batched is True when this episode was already fully
+        delivered via periodic MAVLink batches during recording (see
+        _flush_mavlink_batch / end_episode) — in that case the zip is kept
+        purely as a local durability backup, not re-pushed, since pushing it
+        too would create a second, duplicate episode server-side. It's only
+        False here for the crash-recovery path, where no live batching
+        session existed for the leftover buffer (the node had just
+        restarted) — that's the one case a full-zip MAVLink push is still
+        the only way to deliver it.
         """
-        if not self.offline_mode:
+        if not self.no_internet:
             try:
                 resp = requests.post(
                     '%s/episodes' % self.api_url,
@@ -445,6 +581,146 @@ class EpisodeRecorder(object):
         zip_path, session_id = export_offline_session(data, self.export_dir)
         rospy.loginfo('Offline session exported: %s (session_id=%s)' % (zip_path, session_id))
         self._delete_buffer()
+
+        if self.mavlink_upload_enabled and not already_live_batched:
+            self._mavlink_upload_queue.put(zip_path)
+            rospy.loginfo('Queued for MAVLink upload: %s' % zip_path)
+        elif self.mavlink_upload_enabled:
+            rospy.loginfo('Already delivered via MAVLink live batching — %s kept as local backup only' % zip_path)
+
+    # ------------------------------------------------------------------
+    # MAVLink upload — pushes session zips to a ground-station receiver
+    # (mavlink_upload_receiver.py) over MAVLink FTP, for a vehicle with no
+    # other path to the API. Runs entirely on its own background thread;
+    # never touches the ROS spin/observation-collection path. The zip
+    # already exists on local storage (export_offline_session, above) before
+    # this ever runs, so a failed or interrupted push never loses data — it
+    # just means the zip is still sitting on the vehicle for the next retry
+    # or physical retrieval, exactly like a pure offline_mode deployment.
+    # ------------------------------------------------------------------
+
+    def _mavlink_upload_worker_loop(self):
+        """Runs for the lifetime of the node. Maintains one MAVLink FTP
+        connection, reconnecting on failure, and pushes queued zips in
+        order. A failed push is requeued with a backoff rather than dropped
+        — the zip isn't going anywhere, so it's always worth trying again
+        once the link (or the ground receiver) comes back."""
+        try:
+            from pymavlink import mavutil
+            from pymavlink.mavftp import MAVFTP, MAVFTPSettings
+        except ImportError:
+            rospy.logerr(
+                'mavlink_upload_enabled is true but pymavlink is not installed — '
+                'pip install pymavlink. MAVLink upload disabled; zips will accumulate '
+                'in %s for manual/physical retrieval.' % self.export_dir
+            )
+            return
+
+        ftp = None
+        while True:
+            zip_path = self._mavlink_upload_queue.get()
+            filename = os.path.basename(zip_path)
+
+            if ftp is None:
+                try:
+                    rospy.loginfo('Connecting to MAVLink ground receiver (%s)...' % self.mavlink_connection)
+                    master = mavutil.mavlink_connection(self.mavlink_connection, source_system=self.mavlink_source_system)
+                    master.wait_heartbeat(timeout=30)
+                    ftp = MAVFTP(
+                        master,
+                        target_system=master.target_system,
+                        target_component=master.target_component,
+                        settings=MAVFTPSettings([
+                            ('debug', int, 0), ('pkt_loss_tx', int, 0), ('pkt_loss_rx', int, 0),
+                            ('max_backlog', int, 5), ('burst_read_size', int, 80),
+                            ('write_size', int, 80), ('write_qsize', int, 5),
+                            ('idle_detection_time', float, 3.7), ('read_retry_time', float, 1.0),
+                            ('retry_time', float, 0.5),
+                        ]),
+                    )
+                except Exception as e:  # pylint: disable=broad-except — link may not be up yet; retry, never crash the node
+                    rospy.logwarn('MAVLink connection failed (%s) — will retry' % e)
+                    ftp = None
+                    self._mavlink_upload_queue.put(zip_path)
+                    time.sleep(10)
+                    continue
+
+            try:
+                ftp.cmd_put([zip_path, filename])
+                ret = ftp.process_ftp_reply('CreateFile', timeout=60)
+                if ret.error_code:
+                    raise RuntimeError(str(ret))
+                rospy.loginfo('MAVLink upload complete: %s' % filename)
+            except Exception as e:  # pylint: disable=broad-except — one failed push must not kill the worker
+                rospy.logwarn('MAVLink upload failed for %s (%s) — will retry' % (filename, e))
+                ftp = None  # connection state is unknown after a failure — reconnect clean next time
+                self._mavlink_upload_queue.put(zip_path)
+                time.sleep(10)
+
+    def _flush_mavlink_batch_timer_cb(self, event=None):
+        """rospy.Timer callbacks always receive a TimerEvent arg (unlike
+        rclpy's create_timer) — thin wrapper so _flush_mavlink_batch's
+        signature can stay identical to the ROS 2 version."""
+        self._flush_mavlink_batch()
+
+    def _flush_mavlink_batch(self, is_final=False, end_time=None, success=None):
+        """Push whatever's accumulated in the pending observation/action
+        lists since the last flush, as one small file — the MAVLink-transport
+        equivalent of live_stream_enabled's per-observation HTTP POSTs.
+        Called on a timer (mavlink_batch_interval_s) while an episode is
+        open, and once more from end_episode with is_final=True to close it.
+
+        The receiver (mavlink_upload_receiver.py) opens a live episode on
+        the first batch it sees for a session_id and finishes it on
+        is_final — same lifecycle as _start_live_episode/_finish_live_episode
+        above, just relayed through MAVLink batches instead of the recorder
+        calling those endpoints directly (it can't — no direct API path)."""
+        if not self.mavlink_session_id:
+            return  # not recording, or not in mavlink_upload_enabled mode
+
+        # Skip empty non-final batches — nothing new since last flush, no
+        # point spending a whole FTP transfer on it. Always send the final
+        # one even if empty, since that's what signals "episode is done."
+        if not is_final and not self._mavlink_pending_observations and not self._mavlink_pending_actions:
+            return
+
+        batch = {
+            'session_id': self.mavlink_session_id,
+            'robot_id': self.robot_id,
+            'task_id': self.current_task_id,
+            'start_time': self.episode_start,
+            'metadata': self.metadata,
+            'seq': self._mavlink_batch_seq,
+            'is_final': is_final,
+            'observations': self._mavlink_pending_observations,
+            'actions': self._mavlink_pending_actions,
+        }
+        if is_final:
+            batch['end_time'] = end_time
+            batch['success'] = success
+
+        self._mavlink_pending_observations = []
+        self._mavlink_pending_actions = []
+
+        try:
+            if not os.path.isdir(self._mavlink_batch_dir):
+                os.makedirs(self._mavlink_batch_dir)
+            batch_path = os.path.join(
+                self._mavlink_batch_dir,
+                'livebatch_%s_%04d.json' % (self.mavlink_session_id, self._mavlink_batch_seq),
+            )
+            with open(batch_path, 'w') as f:
+                json.dump(batch, f)
+        except OSError as e:
+            rospy.logwarn('Failed to write MAVLink batch file: %s' % e)
+            return
+
+        self._mavlink_upload_queue.put(batch_path)
+        self._mavlink_batch_seq += 1
+
+        if is_final:
+            rospy.loginfo('Queued final MAVLink batch for session %s' % self.mavlink_session_id)
+            self.mavlink_session_id = None
 
     # ------------------------------------------------------------------
     # Live streaming — best-effort, additive. Every method here fails

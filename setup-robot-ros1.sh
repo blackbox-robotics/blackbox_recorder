@@ -76,18 +76,34 @@ main() {
     info "Find your API Key at: https://www.bbrobotics.in/settings"
     prompt_secret BLACKBOX_API_KEY  "Enter your API Key (Secret Key starting with pk_)"
 
+    # robot_id must be a UUID — the node itself validates this at startup and
+    # refuses to run otherwise (as does the backend's own schema), so a
+    # friendly slug typed here would only fail much later, off-screen.
+    UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    generate_uuid() {
+        if command -v uuidgen &>/dev/null; then
+            uuidgen | tr '[:upper:]' '[:lower:]'
+        elif [[ -f /proc/sys/kernel/random/uuid ]]; then
+            cat /proc/sys/kernel/random/uuid
+        elif command -v python3 &>/dev/null; then
+            python3 -c 'import uuid; print(uuid.uuid4())'
+        else
+            die "Can't generate a UUID for the robot ID — none of uuidgen, /proc/sys/kernel/random/uuid, or python3 is available. Install uuidgen (uuid-runtime package) and re-run."
+        fi
+    }
+
     if [[ -z "$BLACKBOX_ROBOT_ID" ]]; then
-        read -rp "Enter a unique ID for this robot (e.g. my-robot-01) [skip to auto-generate]: " BLACKBOX_ROBOT_ID
+        read -rp "Enter this robot's UUID (from the dashboard, or press Enter to generate a new one): " BLACKBOX_ROBOT_ID
         if [[ -z "$BLACKBOX_ROBOT_ID" ]]; then
-            if command -v uuidgen &>/dev/null; then
-                BLACKBOX_ROBOT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
-            elif [[ -f /proc/sys/kernel/random/uuid ]]; then
-                BLACKBOX_ROBOT_ID=$(cat /proc/sys/kernel/random/uuid)
-            else
-                BLACKBOX_ROBOT_ID="robot-$(date +%s)"
-            fi
+            BLACKBOX_ROBOT_ID=$(generate_uuid)
             info "Auto-generated Robot ID: $BLACKBOX_ROBOT_ID"
         fi
+    fi
+
+    if [[ ! "$BLACKBOX_ROBOT_ID" =~ $UUID_RE ]]; then
+        warn "Robot ID '$BLACKBOX_ROBOT_ID' isn't a valid UUID — the recorder will refuse to start with it."
+        BLACKBOX_ROBOT_ID=$(generate_uuid)
+        info "Generated a valid one instead: $BLACKBOX_ROBOT_ID"
     fi
 
     [[ "$BLACKBOX_API_URL"  =~ ^https?:// ]] || die "API URL must start with http:// or https://"

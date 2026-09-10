@@ -5,7 +5,7 @@
   <version>0.1.0</version>
   <description>Black Box Robotics episode recorder for ROS 2 robots</description>
   <maintainer email="support@blackrobotics.in">Black Box Robotics</maintainer>
-  <license>MIT</license>
+  <license>Proprietary</license>
 
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>

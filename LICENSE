@@ -1,21 +1,37 @@
-MIT License
+Copyright (c) 2026 Black Box Robotics. All rights reserved.
 
-Copyright (c) 2026 blackbox-robotics
+This software (the "Software") and its accompanying documentation are the
+proprietary property of Black Box Robotics ("BlackBox"). The Software is
+made available only to authorized customers and partners of BlackBox under
+the terms below.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. Grant of Use. Subject to your compliance with these terms and any
+   separate agreement in place between you and BlackBox, BlackBox grants
+   you a limited, non-exclusive, non-transferable license to install, run,
+   and modify the Software solely for the purpose of integrating it with
+   your own robots or vehicles and operating it in connection with the
+   BlackBox platform.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+2. Restrictions. You may not: (a) redistribute, sell, sublicense, lease, or
+   otherwise make the Software available to any third party; (b) use the
+   Software to build a competing product or service; (c) remove or alter
+   any copyright, trademark, or proprietary notices contained in the
+   Software; or (d) use the Software for any purpose outside the scope of
+   your agreement with BlackBox.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+3. Ownership. BlackBox retains all right, title, and interest in and to the
+   Software, including all intellectual property rights therein. No rights
+   are granted except as expressly set out in this license.
+
+4. No Warranty. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+   KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+   IN NO EVENT SHALL BLACK BOX ROBOTICS BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+   OTHER LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE
+   OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+5. Termination. This license terminates automatically if you breach any of
+   its terms, or upon termination of your underlying agreement with
+   BlackBox, whichever occurs first.
+
+For licensing inquiries, contact Black Box Robotics.

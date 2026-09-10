@@ -1,3 +1,5 @@
+import os
+
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
@@ -10,6 +12,13 @@ def generate_launch_description():
         DeclareLaunchArgument('api_key', default_value=''),
         DeclareLaunchArgument('robot_id', default_value=''),
         DeclareLaunchArgument('observation_interval_ms', default_value='100'),
+        DeclareLaunchArgument('offline_mode', default_value='false'),
+        DeclareLaunchArgument('export_dir', default_value=os.path.expanduser('~/.blackbox/exports')),
+        DeclareLaunchArgument('live_stream_enabled', default_value='true'),
+        DeclareLaunchArgument('mavlink_upload_enabled', default_value='false'),
+        DeclareLaunchArgument('mavlink_connection', default_value=''),
+        DeclareLaunchArgument('mavlink_source_system', default_value='42'),
+        DeclareLaunchArgument('mavlink_batch_interval_s', default_value='2.0'),
         DeclareLaunchArgument('joint_states_topic', default_value='joint_states'),
         DeclareLaunchArgument('ft_sensor_topic', default_value='ft_sensor'),
         DeclareLaunchArgument('gripper_topic', default_value='gripper/state'),
@@ -28,6 +37,13 @@ def generate_launch_description():
                 'api_key': LaunchConfiguration('api_key'),
                 'robot_id': LaunchConfiguration('robot_id'),
                 'observation_interval_ms': LaunchConfiguration('observation_interval_ms'),
+                'offline_mode': LaunchConfiguration('offline_mode'),
+                'export_dir': LaunchConfiguration('export_dir'),
+                'live_stream_enabled': LaunchConfiguration('live_stream_enabled'),
+                'mavlink_upload_enabled': LaunchConfiguration('mavlink_upload_enabled'),
+                'mavlink_connection': LaunchConfiguration('mavlink_connection'),
+                'mavlink_source_system': LaunchConfiguration('mavlink_source_system'),
+                'mavlink_batch_interval_s': LaunchConfiguration('mavlink_batch_interval_s'),
                 'joint_states_topic': LaunchConfiguration('joint_states_topic'),
                 'ft_sensor_topic': LaunchConfiguration('ft_sensor_topic'),
                 'gripper_topic': LaunchConfiguration('gripper_topic'),
