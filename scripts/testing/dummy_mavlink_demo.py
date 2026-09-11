@@ -34,6 +34,7 @@ import json
 import logging
 import math
 import os
+import random
 import sys
 import time
 import uuid
@@ -43,6 +44,8 @@ from pymavlink import mavutil
 from pymavlink.mavftp import MAVFTP, MAVFTPSettings
 
 log = logging.getLogger("dummy_mavlink_demo")
+
+TASK_IDS = ["pick_and_place", "navigation", "assembly", "inspection", "sorting"]
 
 
 def connect_mavftp(connection: str, source_system: int) -> MAVFTP:
@@ -118,46 +121,26 @@ def make_observation(t: float) -> dict:
     }
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--connection", required=True, help="MAVLink connection to the receiver, e.g. udpout:127.0.0.1:14560")
-    parser.add_argument("--robot-id", default=None, help="Robot UUID (from the dashboard). Omit to auto-generate — auto-registers as a new robot on first batch, same as a real recorder.")
-    parser.add_argument("--task-id", default="mavlink_live_demo")
-    parser.add_argument("--source-system", type=int, default=77)
-    parser.add_argument("--batch-interval-s", type=float, default=2.0)
-    parser.add_argument("--observation-interval-s", type=float, default=0.5)
-    parser.add_argument("--duration-s", type=float, default=0, help="Stop and close the episode after this many seconds. 0 = run until Ctrl+C.")
-    parser.add_argument("--batch-dir", default="/tmp/dummy_mavlink_demo_batches")
-    parser.add_argument("-v", "--verbose", action="store_true")
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    os.makedirs(args.batch_dir, exist_ok=True)
-
-    robot_id = args.robot_id or str(uuid.uuid4())
+def run_episode(ftp: MAVFTP, args: argparse.Namespace, robot_id: str, task_id: str, success: bool) -> None:
+    """Runs one episode for --episode-duration-s, then closes it with the
+    given outcome. Ctrl+C during this raises KeyboardInterrupt up to the
+    caller, which closes the episode as a failure rather than losing it."""
     session_id = str(uuid.uuid4())
-    log.info("robot_id=%s task_id=%s session_id=%s", robot_id, args.task_id, session_id)
-    if not args.robot_id:
-        log.info("No --robot-id given — using a fresh UUID. It'll auto-register as a new robot, same as any first-time recorder.")
-
-    ftp = connect_mavftp(args.connection, args.source_system)
-
     start_time = datetime.now(timezone.utc).isoformat()
     seq = 0
-    pending_observations = []
-    pending_actions = []
+    pending_observations: list = []
+    pending_actions: list = []
     t0 = time.time()
     last_obs = 0.0
     last_batch = time.time()
 
-    log.info("Recording started — Ctrl+C to end the episode cleanly at any time")
+    log.info("Episode started — task=%s session_id=%s target_outcome=%s", task_id, session_id, success)
+
+    interrupted = False
     try:
-        while True:
+        while time.time() - t0 < args.episode_duration_s:
             now = time.time()
             elapsed = now - t0
-
-            if args.duration_s and elapsed >= args.duration_s:
-                break
 
             if now - last_obs >= args.observation_interval_s:
                 pending_observations.append(make_observation(elapsed))
@@ -165,7 +148,7 @@ def main() -> int:
 
             # A fake action partway through, once, just to show the actions
             # list isn't empty on the episode detail page.
-            if 4.5 < elapsed < 5.5 and not pending_actions and seq == 0:
+            if elapsed > args.episode_duration_s * 0.4 and not pending_actions and seq == 0:
                 pending_actions.append({
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "action_type": "demo_marker",
@@ -174,7 +157,7 @@ def main() -> int:
 
             if now - last_batch >= args.batch_interval_s and (pending_observations or pending_actions):
                 batch = {
-                    "session_id": session_id, "robot_id": robot_id, "task_id": args.task_id,
+                    "session_id": session_id, "robot_id": robot_id, "task_id": task_id,
                     "start_time": start_time, "metadata": {"source": "dummy_mavlink_demo"},
                     "seq": seq, "is_final": False,
                     "observations": pending_observations, "actions": pending_actions,
@@ -187,17 +170,70 @@ def main() -> int:
 
             time.sleep(0.1)
     except KeyboardInterrupt:
-        log.info("Interrupted — closing episode")
+        # Still send the closing batch even on Ctrl+C mid-episode — otherwise
+        # this episode is left open on the server forever (the exact bug the
+        # SIGTERM/kill path hit earlier tonight). Re-raise after, so the
+        # outer loop stops instead of starting another episode.
+        interrupted = True
+        log.info("Interrupted mid-episode — sending closing batch before exit")
 
     final_batch = {
-        "session_id": session_id, "robot_id": robot_id, "task_id": args.task_id,
+        "session_id": session_id, "robot_id": robot_id, "task_id": task_id,
         "start_time": start_time, "metadata": {"source": "dummy_mavlink_demo"},
         "seq": seq, "is_final": True,
         "observations": pending_observations, "actions": pending_actions,
-        "end_time": datetime.now(timezone.utc).isoformat(), "success": True,
+        "end_time": datetime.now(timezone.utc).isoformat(), "success": False if interrupted else success,
     }
     push_batch(ftp, args.batch_dir, final_batch)
-    log.info("Episode closed. Check the dashboard's Episodes tab for robot_id=%s", robot_id)
+    log.info("Episode closed — task=%s success=%s", task_id, final_batch["success"])
+    if interrupted:
+        raise KeyboardInterrupt
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--connection", required=True, help="MAVLink connection to the receiver, e.g. udpout:127.0.0.1:14560")
+    parser.add_argument("--robot-id", default=None, help="Robot UUID (from the dashboard). Omit to auto-generate — auto-registers as a new robot on first batch, same as a real recorder.")
+    parser.add_argument("--task-id", default=None, help="Fixed task_id for every episode. Omit to pick a random one per episode from pick_and_place/navigation/assembly/inspection/sorting, for realistic variety.")
+    parser.add_argument("--source-system", type=int, default=77)
+    parser.add_argument("--batch-interval-s", type=float, default=2.0)
+    parser.add_argument("--observation-interval-s", type=float, default=0.5)
+    parser.add_argument("--episode-duration-s", type=float, default=10.0, help="How long each individual episode runs before closing.")
+    parser.add_argument("--pause-between-s", type=float, default=2.0, help="Idle gap between episodes.")
+    parser.add_argument("--fail-rate", type=float, default=0.3, help="Fraction of episodes (0-1) that close with success=false.")
+    parser.add_argument("--episodes", type=int, default=0, help="Number of episodes to run, then exit. 0 = run forever (Ctrl+C to stop).")
+    parser.add_argument("--batch-dir", default="/tmp/dummy_mavlink_demo_batches")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    os.makedirs(args.batch_dir, exist_ok=True)
+
+    robot_id = args.robot_id or str(uuid.uuid4())
+    log.info("robot_id=%s", robot_id)
+    if not args.robot_id:
+        log.info("No --robot-id given — using a fresh UUID. It'll auto-register as a new robot, same as any first-time recorder.")
+
+    ftp = connect_mavftp(args.connection, args.source_system)
+
+    log.info(
+        "Cycling episodes (%s), ~%.0fs each, %.0f%% target fail rate — Ctrl+C to stop cleanly at any time",
+        "forever" if args.episodes == 0 else f"{args.episodes} total", args.episode_duration_s, args.fail_rate * 100,
+    )
+
+    count = 0
+    try:
+        while args.episodes == 0 or count < args.episodes:
+            task_id = args.task_id or random.choice(TASK_IDS)
+            success = random.random() >= args.fail_rate
+            run_episode(ftp, args, robot_id, task_id, success)
+            count += 1
+            if args.episodes == 0 or count < args.episodes:
+                time.sleep(args.pause_between_s)
+    except KeyboardInterrupt:
+        log.info("Interrupted — stopping after the current episode's final batch was already sent")
+
+    log.info("Done — %d episode(s) run. Check the dashboard's Episodes tab / Command Center for robot_id=%s", count, robot_id)
     return 0
 
 
