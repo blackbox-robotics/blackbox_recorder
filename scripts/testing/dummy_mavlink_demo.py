@@ -99,6 +99,31 @@ def push_batch(ftp: MAVFTP, batch_dir: str, batch: dict) -> bool:
     return True
 
 
+FAILURE_MODES = ["mechanical", "perception", "planning", "execution", "environment"]
+FAILURE_DESCRIPTIONS = {
+    "mechanical": "Gripper failed to reach commanded force threshold before timeout.",
+    "perception": "Object pose estimate diverged from expected bounds mid-grasp.",
+    "planning": "Motion planner returned no valid trajectory within the time budget.",
+    "execution": "Joint trajectory tracking error exceeded tolerance during approach.",
+    "environment": "Unexpected obstacle intrusion into the planned workspace.",
+}
+
+
+def make_failure() -> dict:
+    """Note: this is demo-only behavior — the real recorder (episode_recorder.py)
+    never auto-creates failure records in any mode (HTTP live, offline, or
+    MAVLink); failures are reported separately (e.g. the dashboard's Findings
+    panel). This exists purely so a demo's failed episodes also show up in
+    the Failure Library, not just as success=false on the episode itself."""
+    mode = random.choice(FAILURE_MODES)
+    return {
+        "failure_mode": mode,
+        "severity": random.choice(["low", "medium", "high", "critical"]),
+        "description": FAILURE_DESCRIPTIONS[mode],
+        "tags": ["mavlink_demo"],
+    }
+
+
 def make_observation(t: float) -> dict:
     """A smooth fake joint-state + sensor trace so the dashboard's live
     chart shows something visibly moving, not just noise."""
@@ -177,15 +202,18 @@ def run_episode(ftp: MAVFTP, args: argparse.Namespace, robot_id: str, task_id: s
         interrupted = True
         log.info("Interrupted mid-episode — sending closing batch before exit")
 
+    final_success = False if interrupted else success
     final_batch = {
         "session_id": session_id, "robot_id": robot_id, "task_id": task_id,
         "start_time": start_time, "metadata": {"source": "dummy_mavlink_demo"},
         "seq": seq, "is_final": True,
         "observations": pending_observations, "actions": pending_actions,
-        "end_time": datetime.now(timezone.utc).isoformat(), "success": False if interrupted else success,
+        "end_time": datetime.now(timezone.utc).isoformat(), "success": final_success,
     }
+    if not final_success:
+        final_batch["failure"] = make_failure()
     push_batch(ftp, args.batch_dir, final_batch)
-    log.info("Episode closed — task=%s success=%s", task_id, final_batch["success"])
+    log.info("Episode closed — task=%s success=%s", task_id, final_success)
     if interrupted:
         raise KeyboardInterrupt
 

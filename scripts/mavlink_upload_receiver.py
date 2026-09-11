@@ -238,6 +238,27 @@ def relay_batch_to_dashboard(api_url: str, api_key: str, session_map: "SessionMa
             log.error("Could not finish episode %s: %s — it will stay shown as RECORDING until closed manually", episode_id, e)
         session_map.discard(session_id)
 
+        # Optional — only present when the sender attaches one (e.g. the
+        # dummy demo script on a failed episode). The real recorder never
+        # sends this; failures are reported separately in every other path
+        # too (e.g. the dashboard's Findings panel), not auto-created from
+        # episode success/failure.
+        failure = batch.get("failure")
+        if failure:
+            try:
+                r = requests.post(
+                    f"{api_url.rstrip('/')}/episodes/{episode_id}/failures",
+                    headers=headers,
+                    json=failure,
+                    timeout=15,
+                )
+                if r.status_code == 201:
+                    log.info("Recorded failure for episode %s (%s)", episode_id, failure.get("failure_mode"))
+                else:
+                    log.error("Could not record failure for episode %s: %s %s", episode_id, r.status_code, r.text)
+            except requests.RequestException as e:
+                log.error("Could not record failure for episode %s: %s", episode_id, e)
+
     return True
 
 
