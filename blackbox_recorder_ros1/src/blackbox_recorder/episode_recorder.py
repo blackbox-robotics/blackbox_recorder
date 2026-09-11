@@ -625,7 +625,18 @@ class EpisodeRecorder(object):
                 try:
                     rospy.loginfo('Connecting to MAVLink ground receiver (%s)...' % self.mavlink_connection)
                     master = mavutil.mavlink_connection(self.mavlink_connection, source_system=self.mavlink_source_system)
-                    master.wait_heartbeat(timeout=30)
+                    # A udpin (server) socket only replies to addresses it has
+                    # already heard from — a purely receive-only wait here
+                    # would deadlock against a receiver that's also only
+                    # replying. Broadcast our own heartbeat while waiting so
+                    # the server has something to reply to.
+                    deadline = time.time() + 30
+                    hb = None
+                    while time.time() < deadline and hb is None:
+                        master.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER, mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
+                        hb = master.wait_heartbeat(timeout=1)
+                    if hb is None:
+                        raise TimeoutError('No heartbeat from MAVLink ground receiver on %s after 30s' % self.mavlink_connection)
                     ftp = MAVFTP(
                         master,
                         target_system=master.target_system,
